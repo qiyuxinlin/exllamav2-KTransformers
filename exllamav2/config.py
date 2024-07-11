@@ -82,6 +82,7 @@ class ExLlamaV2Config:
     hidden_size: int
     initializer_range: float
     intermediate_size: int
+    shared_expert_intermediate_size: int | None
     num_attention_heads: int
     num_key_value_heads: int
     num_key_value_groups: int
@@ -103,7 +104,8 @@ class ExLlamaV2Config:
 
     checkpoint_fused_mlp: bool
 
-
+    norm_topk_prob = True
+    mlp_share_experts_bias = False
     def __init__(self,
                  model_dir: str | None = None):
         """
@@ -226,7 +228,12 @@ class ExLlamaV2Config:
             default_intermediate_size = no_default
 
         self.intermediate_size = read(read_config, int, ["intermediate_size", "ffn_config->ffn_hidden_size", "n_inner"], default_intermediate_size)
-        self.num_experts = read(read_config, int, ["num_local_experts", "ffn_config->moe_num_experts"], None)
+        #Qwen2 add config
+        if self.arch.arch_string == "Qwen2MoeForCausalLM":
+            self.shared_expert_intermediate_size = read(read_config, int, ["shared_expert_intermediate_size"], self.intermediate_size)
+            self.intermediate_size = read(read_config, int, ["moe_intermediate_size"], self.intermediate_size)
+            self.norm_topk_prob = read(read_config, bool, ["norm_topk_prob"], True)
+        self.num_experts = read(read_config, int, ["num_local_experts", "ffn_config->moe_num_experts", "num_experts"], None)
         self.num_experts_per_token = read(read_config, int,["num_experts_per_tok", "ffn_config->moe_top_k"], None)
 
         # Logit/embedding/residual scale

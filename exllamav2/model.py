@@ -41,7 +41,7 @@ from exllamav2.layernorm import ExLlamaV2LayerNorm
 from exllamav2.attn import ExLlamaV2Attention, has_flash_attn, has_xformers
 from exllamav2.lora import ExLlamaV2Lora
 from exllamav2.mlp import ExLlamaV2MLP
-from exllamav2.moe_mlp import ExLlamaV2MoEMLP
+from exllamav2.moe_mlp import ExLlamaV2MoEMLP, ExLlamaV2MoEShareMLP
 from exllamav2.parallel_decoder import ExLlamaV2ParallelDecoder
 from exllamav2.embedding import ExLlamaV2Embedding
 from exllamav2.pos_embedding import ExLlamaV2PosEmbedding
@@ -227,7 +227,11 @@ class ExLlamaV2:
                 self.modules += [pd]
             else:
                 attn = ExLlamaV2Attention(self, layer_key, layer_idx)
-                if self.config.arch.is_moe: mlp = ExLlamaV2MoEMLP(self, layer_key, layer_idx)
+                if self.config.arch.is_moe: 
+                    if hasattr(self.config, 'shared_expert_intermediate_size'):
+                        mlp = ExLlamaV2MoEShareMLP(self, layer_key, layer_idx)
+                    else:
+                        mlp = ExLlamaV2MoEMLP(self, layer_key, layer_idx)
                 else: mlp = ExLlamaV2MLP(self, layer_key, layer_idx)
                 self.modules += [attn, mlp]
 
@@ -249,12 +253,24 @@ class ExLlamaV2:
         self.modules += [head]
 
         # Compile dictionary of modules
-
-        for module in self.modules:
+        def add2modules_dict(modules_dict,module):
             if len(module.submodules) > 0:
-                for m in module.submodules: self.modules_dict[m.key] = m
+                for submodules in module.submodules:
+                    add2modules_dict(modules_dict,submodules)
             else:
-                self.modules_dict[module.key] = module
+                modules_dict[module.key] = module
+        for module in self.modules:
+            add2modules_dict(self.modules_dict,module)
+        # for module in self.modules:
+        #     if len(module.submodules) > 0:
+        #         for m in module.submodules:
+        #             if len(m.submodules) == 0:
+        #                 self.modules_dict[m.key] = m
+        #             else:
+        #                 for mm in m.submodules:
+        #                     self.modules_dict[mm.key] = mm
+        #     else:
+        #         self.modules_dict[module.key] = module
 
         # Find last layer that affects k/v cache
 

@@ -35,6 +35,14 @@ layer_keys_mixtral_mlp = [["block_sparse_moe.experts.*.w1"],
                           ["block_sparse_moe.experts.*.w2"],
                           ["block_sparse_moe.experts.*.w3"],
                           ["block_sparse_moe.gate"]]
+layer_keys_qwen2_moe_mlp = [["mlp.experts.*.gate_proj"],
+                          ["mlp.experts.*.down_proj"],
+                          ["mlp.experts.*.up_proj"],
+                          ["mlp.gate"],
+                          ["mlp.shared_expert.down_proj"],
+                          ["mlp.shared_expert.gate_proj"],
+                          ["mlp.shared_expert.up_proj"],
+                          ["mlp.shared_expert_gate"]]
 layer_keys_dbrx_mlp = [["block_sparse_moe.experts.*.v1", "block_sparse_moe.experts.v1"],
                        ["block_sparse_moe.experts.*.w1", "block_sparse_moe.experts.w1"],
                        ["block_sparse_moe.experts.*.w2", "block_sparse_moe.experts.w2"],
@@ -271,6 +279,46 @@ class ExLlamaV2ArchParams:
             self.mqa = False
             self.scale_attn_weights = False
 
+        # Qwen2 (1.5)
+
+        if arch_string == "Qwen2MoeForCausalLM":
+            arch_recognized = True
+            self.layer_keys += \
+                layer_keys_llama_norms + \
+                layer_keys_llama_attn + \
+                layer_keys_qwen2_moe_mlp
+            self.expect_keys += \
+                expect_keys_llama
+            self.norm_eps_key = "rms_norm_eps"
+            self.attention_bias_qkv = True
+            self.attention_bias_o = False
+            self.mlp_bias = False
+            self.mlp_gate = True
+            self.mlp_key_gate = ".mlp.experts.*.gate_proj"
+            self.mlp_key_up = ".mlp.experts.*.up_proj"
+            self.mlp_key_down = ".mlp.experts.*.down_proj"
+            self.mlp_key_expert_gate = '.mlp.gate'
+            self.mlp_share_experts_gate = '.mlp.shared_expert.gate_proj'
+            self.mlp_share_experts_up = '.mlp.shared_expert.up_proj'
+            self.mlp_share_experts_down = '.mlp.shared_expert.down_proj'
+            self.shared_expert_gate = '.mlp.shared_expert_gate'
+            self.mlp_act_func = "silu"
+            self.is_moe = True
+            self.norm = "rmsnorm"
+            self.lm_head_key = "lm_head"
+            self.normalize_embeddings = False
+            self.norm_key_1 = ".input_layernorm"
+            self.norm_key_2 = ".post_attention_layernorm"
+            self.norm_constant_bias = 0
+            self.parallel_decoder_blocks = False
+            self.requires_bos = False
+            self.rope_style = RopeStyle.NEOX
+            self.keymap = None
+            self.fused_qkv_key = None
+            self.mqa = False
+            self.scale_attn_weights = False
+
+            
         # Gemma
 
         if arch_string == "GemmaForCausalLM":
