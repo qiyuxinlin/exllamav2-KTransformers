@@ -4,7 +4,7 @@ from exllamav2 import ExLlamaV2, ExLlamaV2Tokenizer, SeqTensor, ExLlamaV2Lora
 from exllamav2.generator import ExLlamaV2Sampler
 from exllamav2.generator.filters import ExLlamaV2Filter
 from exllamav2.cache import ExLlamaV2CacheBase, ExLlamaV2Cache_8bit
-from exllamav2.attn import ExLlamaV2Attention, assert_paged_attn
+from exllamav2.attn import ExLlamaV2Attention, ExLlamaV2DeepSeekAttention, assert_paged_attn
 from exllamav2.ext import exllamav2_ext as ext_c, none_tensor
 from concurrent.futures import ThreadPoolExecutor
 
@@ -821,7 +821,7 @@ class ExLlamaV2DynamicGenerator:
         #     cache_seqlens[i].item() + q_len <= block_index.shape[-1] * self.page_size
         #     for i in range(batch_size)
         # )
-
+        # TODO add page
         if self.paged:
 
             return ExLlamaV2Attention.PagedParams(
@@ -834,11 +834,18 @@ class ExLlamaV2DynamicGenerator:
             )
         else:
             assert cache_seqlens.shape[0] == 1
-            return ExLlamaV2Attention.Params(
-                batch_size = 1,
-                seq_len = q_len,
-                past_len = cache_seqlens[0].item()
-            )
+            if self.model.config.arch.arch_string != "DeepseekV2ForCausalLM":
+                return ExLlamaV2Attention.Params(
+                    batch_size = 1,
+                    seq_len = q_len,
+                    past_len = cache_seqlens[0].item()
+                )
+            else:
+                return ExLlamaV2DeepSeekAttention.Params(
+                    batch_size = 1,
+                    seq_len = q_len,
+                    past_len = cache_seqlens[0].item()
+                )
 
     @torch.inference_mode
     def iterate(self) -> list[dict]:

@@ -2,11 +2,11 @@
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from exllamav2 import ExLlamaV2, ExLlamaV2Config, ExLlamaV2Cache, ExLlamaV2Tokenizer, Timer
+from exllamav2 import ExLlamaV2, ExLlamaV2Config, ExLlamaV2Cache, ExLlamaV2Tokenizer, Timer, ExLlamaV2DeppSeekCache
 from exllamav2.generator import ExLlamaV2DynamicGenerator
 
-# model_dir = "/data/model/Mistral-87B-Instruct-v0.1"
-model_dir = "/data/model/DeepSeek-V2-Lite-Chat"
+model_dir = "/data/model/Mistral-87B-Instruct-v0.1"
+# model_dir = "/data/model/DeepSeek-V2-Lite-Chat"
 # model_dir = "/data/model/Qwen1.5-MoE-A2.7B-Chat"
 # model_dir = "/data/model/Qwen1.5-7B-Chat"
 # model_dir = "/data/model/Qwen2-57B-A14B-Instruct"
@@ -14,6 +14,7 @@ model_dir = "/data/model/DeepSeek-V2-Lite-Chat"
 config = ExLlamaV2Config(model_dir)
 model = ExLlamaV2(config)
 cache = ExLlamaV2Cache(model, max_seq_len = 4096, lazy = True)
+# cache = ExLlamaV2DeppSeekCache(model, max_seq_len = 4096, lazy = True)
 model.load_autosplit(cache, progress = True)
 
 print("Loading tokenizer...")
@@ -25,6 +26,7 @@ generator = ExLlamaV2DynamicGenerator(
     model = model,
     cache = cache,
     tokenizer = tokenizer,
+    paged = False,
 )
 
 max_new_tokens = 250
@@ -36,7 +38,7 @@ max_new_tokens = 250
 generator.warmup()
 
 # Generate one completion, using default settings
-
+# prompt = "<im_start>user\n你好，请问你能做什么?<im_end>\n<im_start>assistant\n"
 prompt = "你好，请问你能做什么,"
 
 with Timer() as t_single:

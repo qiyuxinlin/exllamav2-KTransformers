@@ -120,6 +120,7 @@ class ExLlamaV2Config:
     kv_lora_rank:int | None
     v_head_dim:int | None
     qk_nope_head_dim:int | None
+    rope_scaling: dict | None
 
     norm_topk_prob = True
     mlp_share_experts_bias = False
@@ -274,7 +275,6 @@ class ExLlamaV2Config:
         self.num_experts = read(read_config, int, ["num_local_experts", "ffn_config->moe_num_experts", "num_experts", "n_routed_experts"], None)
         self.num_experts_per_token = read(read_config, int,["num_experts_per_tok", "ffn_config->moe_top_k",], None)
 
-        # DeepSeek add config
 
 
         # Logit/embedding/residual scale
@@ -317,8 +317,10 @@ class ExLlamaV2Config:
                 self.scale_short_factor = rs["short_factor"]
                 self.original_max_seq_len = read_config["original_max_position_embeddings"]
                 self.alt_rope_method = "su"
-            # if scaling_type == "yarn":
-            #     self.scale_alpha_value = factor
+            # DeepSeek add Config
+            if scaling_type == "yarn":
+                self.rope_scaling = rs
+
 
         # Create map of model tensors
 

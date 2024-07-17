@@ -272,6 +272,70 @@ class ExLlamaV2Cache(ExLlamaV2CacheBase):
     def all_tensors(self):
         return self.key_states + self.value_states
 
+class ExLlamaV2DeppSeekCache(ExLlamaV2CacheBase):
+    """
+    FP16 cache
+    """
+    v_head_dim:int
+    qk_rope_head_dim:int
+    qk_nope_head_dim:int
+    def __init__(self,
+                 model: ExLlamaV2,
+                 batch_size: int = 1,
+                 max_seq_len: int = -1,
+                 copy_from: ExLlamaV2Cache | None = None,
+                 lazy: bool = False):
+
+        super().__init__(model, batch_size, max_seq_len, torch.half, 1, 1, False)
+        self.v_head_dim = self.model.config.v_head_dim
+        self.qk_nope_head_dim = self.model.config.qk_nope_head_dim
+        self.qk_rope_head_dim = self.model.config.qk_rope_head_dim
+        self.shape_wk = (self.batch_size, self.max_seq_len, self.num_key_value_heads, self.qk_nope_head_dim + self.qk_rope_head_dim)
+        self.shape_wv = (self.batch_size, self.max_seq_len, self.num_key_value_heads, self.v_head_dim)
+        self.create_state_tensors(copy_from, lazy)
+
+
+    def get_kv_state(self,
+                     layer_idx: int,
+                     batch_size: int,
+                     offset: int,
+                     width: int,
+                     page_size: int = 0,
+                     cache_seqlens: torch.Tensor | None = None,
+                     block_table: torch.Tensor | None = None) -> (torch.Tensor, torch.Tensor):
+
+        return self.key_states[layer_idx], self.value_states[layer_idx]
+
+
+    def store_kv_state(self,
+                       layer_idx: int,
+                       batch_size: int,
+                       offset: int,
+                       width: int,
+                       page_size: int = 0,
+                       cache_seqlens: torch.Tensor | None = None,
+                       block_table: torch.Tensor | None = None):
+
+        pass
+
+
+    def footprint(self):
+
+        fp = []
+        for layer in self.key_states + self.value_states:
+            dev = layer.device.index
+            while len(fp) <= dev: fp.append(0)
+            fp[dev] += layer.numel() * 2
+        return fp
+
+
+    def clone(self):
+
+        new = ExLlamaV2Cache(self.model, self.batch_size, self.max_seq_len, self)
+        return new
+
+    def all_tensors(self):
+        return self.key_states + self.value_states
 
 class ExLlamaV2Cache_8bit(ExLlamaV2CacheBase):
     """

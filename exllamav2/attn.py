@@ -1097,12 +1097,51 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
 
     config:ExLlamaV2Config
 
-    def _init_rope(self):#@TODO add rope_scaling
-        self.rotary_emb = DeepseekV2RotaryEmbedding(
+    def _init_rope(self):
+        if self.config.rope_scaling is None:
+            self.rotary_emb = DeepseekV2RotaryEmbedding(
                 self.qk_rope_head_dim,
                 max_position_embeddings=self.config.max_seq_len,
                 base=self.config.rotary_embedding_base,
             )
+        else:
+            scaling_type = self.config.rope_scaling["type"]
+            scaling_factor = self.config.rope_scaling["factor"]
+            if scaling_type == "linear":
+                self.rotary_emb = DeepseekV2LinearScalingRotaryEmbedding(
+                    self.qk_rope_head_dim,
+                    max_position_embeddings=self.config.max_seq_len,
+                    scaling_factor=scaling_factor,
+                    base=self.config.rotary_embedding_base,
+                )
+            elif scaling_type == "dynamic":
+                self.rotary_emb = DeepseekV2DynamicNTKScalingRotaryEmbedding(
+                    self.qk_rope_head_dim,
+                    max_position_embeddings=self.config.max_seq_len,
+                    scaling_factor=scaling_factor,
+                    base=self.config.rotary_embedding_base,
+                )
+            elif scaling_type == "yarn":
+                kwargs = {
+                    key: self.config.rope_scaling[key]
+                    for key in [
+                        "original_max_position_embeddings",
+                        "beta_fast",
+                        "beta_slow",
+                        "mscale",
+                        "mscale_all_dim",
+                    ]
+                    if key in self.config.rope_scaling
+                }
+                self.rotary_emb = DeepseekV2YarnRotaryEmbedding(
+                    self.qk_rope_head_dim,
+                    max_position_embeddings=self.config.max_seq_len,
+                    scaling_factor=scaling_factor,
+                    base=self.config.rotary_embedding_base,
+                    **kwargs,
+                )
+            else:
+                raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
             
     class Params:
 
@@ -1325,7 +1364,7 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
             self.q_a_proj = ExLlamaV2Linear(model, key + ".self_attn.q_a_proj", hidden_size, self.q_lora_rank, has_bias=False, f_key=None)
             self.q_a_layernorm = ExLlamaV2RMSNorm(model, key + ".self_attn.q_norm")
             self.q_b_proj = ExLlamaV2Linear(model, key + ".self_attn.q_b_proj", hidden_size, self.q_lora_rank, has_bias=False, f_key=None)
-        self.kv_a_proj_with_mqa = ExLlamaV2Linear(model, key + ".self_attn.kv_a_proj_with_mqa", hidden_size, self.kv_lora_rank + self.qk_rope_head_dim)
+        self.kv_a_proj_with_mqa = ExLlamaV2Linear(model, key + ".self_attn.kv_a_proj_with_mqa", hidden_size, self.kv_lora_rank + self.qk_rope_head_dim, has_bias=cfg.arch.attention_bias_o, f_key=None)
         self.kv_a_layernorm = ExLlamaV2RMSNorm(model, key + ".self_attn.kv_a_layernorm")
         self.kv_b_proj = ExLlamaV2Linear(model, key + ".self_attn.kv_b_proj", self.kv_lora_rank, self.num_heads*(self.q_head_dim - self.qk_rope_head_dim + self.v_head_dim), has_bias=False, f_key=None)
         self.o_proj = ExLlamaV2Linear(model, key + ".self_attn.o_proj", self.num_heads * self.v_head_dim, hidden_size, has_bias=cfg.arch.attention_bias_o, f_key=None)
@@ -1380,7 +1419,8 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
                     self.kv_a_layernorm.numel() + \
                     self.kv_b_proj.numel() + \
                     self.o_proj.numel()
-
+        if self.input_layernorm is not None:
+            numel += self.input_layernorm.numel()
         return numel
 
 
@@ -1390,108 +1430,61 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
         cfg = self.model.config
 
         if self.input_layernorm is not None: self.input_layernorm.load()
-        self.q_proj.load()
-        self.k_proj.load()
-        self.v_proj.load()
+
+
+        if self.q_lora_rank is None:
+            self.q_proj.load()
+        else:
+            self.q_a_proj.load()
+            self.q_a_layernorm.load()
+            self.q_b_proj.load()
+
+        self.kv_a_proj_with_mqa.load()
+        self.kv_a_layernorm.load()
+        self.kv_b_proj.load()
         self.o_proj.load()
-        if self.q_norm is not None: self.q_norm.load()
-        if self.k_norm is not None: self.k_norm.load()
 
-        if self.q_proj.is_quant():
-
-            assert self.k_proj.is_quant() and self.v_proj.is_quant() and self.o_proj.is_quant(), "Partially quantized attention layer"
-
-            device_tensors = self.model.get_device_tensors(self.device_idx)
-            device_tensors.begin_scratch_alloc()
-            self.temp_state = device_tensors.get_scratch_slice(self.temp_state_size())
-            # self.temp_q = device_tensors.get_scratch_slice(self.temp_q_size())
-            # self.temp_k = device_tensors.get_scratch_slice(self.temp_k_size())
-            # self.temp_v = device_tensors.get_scratch_slice(self.temp_v_size())
-            self.temp_dq = device_tensors.get_scratch_slice(self.temp_dq_size())
-            # self.temp_kv = device_tensors.get_scratch_slice(self.temp_kv_size()) if cfg.num_attention_heads != cfg.num_key_value_heads else None
-
-            if self.has_norm:
-                norm_weight = self.input_layernorm.weight if self.input_layernorm.weight is not None else none_tensor
-                norm_bias = self.input_layernorm.bias if self.input_layernorm.bias is not None else none_tensor
-                is_rms = isinstance(self.input_layernorm, ExLlamaV2RMSNorm)
-                eps = self.input_layernorm.variance_epsilon
-            else:
-                norm_weight = none_tensor
-                norm_bias = none_tensor
-                is_rms = False
-                eps = 0
-
-            if self.q_norm is None:
-                q_norm = none_tensor
-            else:
-                q_norm = self.q_norm.weight
-
-            if self.k_norm is None:
-                k_norm = none_tensor
-            else:
-                k_norm = self.k_norm.weight
-
-            self.q_handle = ext_c.make_q_attn(
-                norm_weight,
-                norm_bias,
-                is_rms,
-                eps,
-                self.q_proj.q_handle,
-                self.k_proj.q_handle,
-                self.v_proj.q_handle,
-                self.o_proj.q_handle,
-                self.temp_state,
-                # self.temp_q,
-                # self.temp_k,
-                # self.temp_v,
-                self.temp_dq,
-                cfg.max_input_len * cfg.max_batch_size,
-                cfg.hidden_size,
-                cfg.num_attention_heads,
-                cfg.num_key_value_heads,
-                cfg.head_dim,
-                cfg.max_seq_len,
-                self.has_residual,
-                cfg.arch.rope_style.value,
-                q_norm,
-                k_norm
-            )
-
+        # TODO quant
 
     def unload(self):
-        if self.q_handle is not None:
-            ext_c.free_q_attn(self.q_handle)
-            self.q_handle = None
+        # if self.q_handle is not None:
+        #     ext_c.free_q_attn(self.q_handle)
+        #     self.q_handle = None
 
         if self.input_layernorm is not None: self.input_layernorm.unload()
-        if self.q_proj is not None: self.q_proj.unload()
-        if self.k_proj is not None: self.k_proj.unload()
-        if self.v_proj is not None: self.v_proj.unload()
+
+
+        if self.q_lora_rank is None:
+            self.q_proj.unload()
+        else:
+            self.q_a_proj.unload()
+            self.q_a_layernorm.unload()
+            self.q_b_proj.unload()
+
+        self.kv_a_proj_with_mqa.unload()
+        self.kv_a_layernorm.unload()
+        self.kv_b_proj.unload()
         self.o_proj.unload()
-
-        self.temp_state = None
-        self.temp_dq = None
-
-        if self.q_norm is not None: self.q_norm.unload()
-        if self.k_norm is not None: self.k_norm.unload()
-
+        # TODO quant
 
     def weight_footprint(self):
 
-        fp = self.q_proj.weight_footprint() + \
-             self.k_proj.weight_footprint() + \
-             self.v_proj.weight_footprint() + \
+        fp = self.kv_a_proj_with_mqa.weight_footprint() + \
+             self.kv_a_layernorm.weight_footprint() + \
+             self.kv_b_proj.weight_footprint() + \
              self.o_proj.weight_footprint()
         if self.input_layernorm is not None:
             fp += self.input_layernorm.weight_footprint()
-        if self.q_norm is not None:
-            fp += self.q_norm.weight_footprint()
-        if self.k_norm is not None:
-            fp += self.k_norm.weight_footprint()
+        if self.q_lora_rank is not None:
+            fp += self.q_proj.weight_footprint()
+        else:
+            fp += self.q_a_proj.weight_footprint()
+            fp += self.q_a_layernorm.weight_footprint()
+            fp += self.q_b_proj.weight_footprint()
 
         return fp
 
-
+    # TODO 
     def scratch_space_fixed(self):
 
         return self.temp_state_size() + \
@@ -1534,11 +1527,20 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
 
 
     def temp_dq_size(self):
+        if self.q_lora_rank is None:
+            return max(self.q_proj.temp_dq_size(),
+                       self.kv_a_proj_with_mqa.temp_dq_size(),
+                       self.kv_b_proj.temp_dq_size(),
+                       self.o_proj.temp_dq_size(),
+                       ) 
+        else:
+            return max(self.q_a_proj.temp_dq_size(),
+                       self.q_b_proj.temp_dq_size(),
+                       self.kv_a_proj_with_mqa.temp_dq_size(),
+                       self.kv_b_proj.temp_dq_size(),
+                       self.o_proj.temp_dq_size(),
+                       )
 
-        return max(self.q_proj.temp_dq_size(),
-                   self.k_proj.temp_dq_size(),
-                   self.v_proj.temp_dq_size(),
-                   self.o_proj.temp_dq_size())
 
 
     def temp_kv_size(self):
@@ -1567,13 +1569,21 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
     def set_device_idx(self, idx):
         super().set_device_idx(idx)
 
+
+        
         if self.input_layernorm is not None: self.input_layernorm.set_device_idx(idx)
-        self.q_proj.set_device_idx(idx)
-        self.k_proj.set_device_idx(idx)
-        self.v_proj.set_device_idx(idx)
+
+        if self.q_lora_rank is None:
+            self.q_proj.set_device_idx(idx)
+        else:
+            self.q_a_proj.set_device_idx(idx)
+            self.q_a_layernorm.set_device_idx(idx)
+            self.q_b_proj.set_device_idx(idx)
+
+        self.kv_a_proj_with_mqa.set_device_idx(idx)
+        self.kv_a_layernorm.set_device_idx(idx)
+        self.kv_b_proj.set_device_idx(idx)
         self.o_proj.set_device_idx(idx)
-        if self.q_norm is not None: self.q_norm.set_device_idx(idx)
-        if self.k_norm is not None: self.k_norm.set_device_idx(idx)
 
 
     def repeat_kv(self, hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -1739,39 +1749,23 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
 
     def _attn_torch(self, batch_size, q_len, q_states, k_states, v_states, attn_params, cfg):
 
-        if has_lower_right_sdpa and attn_params.is_causal() and not cfg.no_sdpa:
 
-            q_states = q_states.transpose(1, 2)
-            k_states = k_states.transpose(1, 2)
-            v_states = v_states.transpose(1, 2)
 
-            k_states = self.repeat_kv(k_states, cfg.num_key_value_groups)
-            v_states = self.repeat_kv(v_states, cfg.num_key_value_groups)
-
-            attn_mask_lr = causal_lower_right(q_len, k_states.shape[2])
-            attn_output = F.scaled_dot_product_attention(q_states, k_states, v_states, attn_mask_lr)
-
-        else:
-
-            q_states = q_states.transpose(1, 2)
-            k_states = k_states.transpose(1, 2)
-            v_states = v_states.transpose(1, 2)
-
-            k_states = self.repeat_kv(k_states, cfg.num_key_value_groups)
-            k_states = k_states.transpose(-1, -2)
-
-            attn_weights = torch.matmul(q_states, k_states)
-
-            attn_weights *= 1 / math.sqrt(cfg.head_dim)
-            attn_mask = attn_params.get_attn_mask(attn_weights.device)
-            if attn_mask is not None: attn_weights = attn_weights + attn_mask
-            attn_weights = nn.functional.softmax(attn_weights, dim = -1, dtype = torch.float16)
-
-            v_states = self.repeat_kv(v_states, cfg.num_key_value_groups)
-            attn_output = torch.matmul(attn_weights, v_states)
-
+        q_states = q_states.transpose(1, 2)
+        k_states = k_states.transpose(1, 2)
+        v_states = v_states.transpose(1, 2)
+        k_states = self.repeat_kv(k_states, self.config.num_key_value_groups)
+        k_states = k_states.transpose(-1, -2)
+        attn_weights = torch.matmul(q_states, k_states)
+        attn_weights *= self.softmax_scale
+        # attn_weights *= 1 / math.sqrt(cfg.head_dim)
+        attn_mask = attn_params.get_attn_mask(attn_weights.device)
+        if attn_mask is not None: attn_weights = attn_weights + attn_mask
+        attn_weights = nn.functional.softmax(attn_weights, dim = -1, dtype = torch.float16)
+        v_states = self.repeat_kv(v_states, self.config.num_key_value_groups)
+        attn_output = torch.matmul(attn_weights, v_states)
         attn_output = attn_output.transpose(1, 2)
-        attn_output = attn_output.reshape((batch_size, q_len, cfg.num_attention_heads * cfg.head_dim))
+        attn_output = attn_output.reshape((batch_size, q_len, self.config.num_attention_heads * self.config.head_dim))
         return attn_output
 
 
@@ -1828,6 +1822,7 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
         global has_xformers
 
         if isinstance(attn_params, ExLlamaV2Attention.PagedParams):
+            raise NotImplementedError
             return self.forward_paged(
                 hidden_states,
                 cache,
@@ -1846,7 +1841,7 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
                 loras = loras,
                 **kwargs
             )
-
+        raise NotImplementedError
         cfg = self.model.config
         constants = self.model.get_device_tensors(self.device_idx)
 
@@ -1977,38 +1972,51 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
         past_len = 0 if cache is None else cache.current_seq_len
 
         # Project q, k, v
-
         residual = hidden_states
         post_norm = self.input_layernorm.forward(hidden_states) if self.has_norm else hidden_states
 
-        query_states = self.q_proj.forward(post_norm, loras = loras)
-        key_states = self.k_proj.forward(post_norm, loras = loras)
-        value_states = self.v_proj.forward(post_norm, loras = loras)
+        if self.q_lora_rank is None:
+            q = self.q_proj.forward(post_norm, loras = loras)
+        else:
+            q = self.q_b_proj.forward(self.q_a_layernorm(self.q_a_proj(post_norm)), loras = loras)
+        q = q.view(batch_size, q_len, self.num_heads, self.q_head_dim).transpose(1, 2)
+        q_nope, q_pe = torch.split(
+            q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+        )
+        compressed_kv = self.kv_a_proj_with_mqa.forward(post_norm, loras = loras)
+        compressed_kv, k_pe = torch.split(
+            compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
+        k_pe = k_pe.view(batch_size, q_len, 1, self.qk_rope_head_dim).transpose(1, 2)
+        kv = (
+            self.kv_b_proj.forward(self.kv_a_layernorm.forward(compressed_kv), loras = loras)
+            .view(batch_size, q_len, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+            .transpose(1, 2)
+        )
+        k_nope, value_states = torch.split(
+            kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+        )
+        kv_seq_len = value_states.shape[-2]
+        kv_seq_len += past_len
+        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        position_ids = torch.arange(past_len, past_len + q_len)[None,:].expand(batch_size,q_len)
+        q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin, position_ids)
+        query_states = k_pe.new_empty(batch_size, self.num_heads, q_len, self.q_head_dim)
+        query_states[:, :, :, : self.qk_nope_head_dim] = q_nope
+        query_states[:, :, :, self.qk_nope_head_dim :] = q_pe
 
+        key_states = k_pe.new_empty(batch_size, self.num_heads, q_len, self.q_head_dim)
+        key_states[:, :, :, : self.qk_nope_head_dim] = k_nope
+        key_states[:, :, :, self.qk_nope_head_dim :] = k_pe
+
+        query_states = query_states.transpose(1, 2)
+        key_states = key_states.transpose(1, 2)
+        value_states = value_states.transpose(1, 2)        
         # Shape for attention
 
-        query_states = query_states.view(batch_size, q_len, num_attention_heads, head_dim)
-        key_states = key_states.view(batch_size, q_len, num_key_value_heads, head_dim)
-        value_states = value_states.view(batch_size, q_len, num_key_value_heads, head_dim)
-
-        # Apply Q/K norms
-
-        if cfg.use_qk_norm:
-            query_states = self.q_norm.forward(query_states)
-            key_states = self.k_norm.forward(key_states)
-
-        # Apply position embeddings
-
-        constants = self.model.get_device_tensors(self.device_idx, scratch = False)
-
-        if attn_params.position_offsets is not None:
-            position_offsets = attn_params.get_position_offsets(hidden_states.device)
-        else:
-            position_offsets = none_tensor
-
-        if cfg.arch.rope_style != RopeStyle.NONE:
-            ext_c.rope_(query_states, constants.sin, constants.cos, past_len, num_attention_heads, head_dim, position_offsets, cfg.arch.rope_style == RopeStyle.NEOX)
-            ext_c.rope_(key_states, constants.sin, constants.cos, past_len, num_key_value_heads, head_dim, position_offsets, cfg.arch.rope_style == RopeStyle.NEOX)
+        # query_states = query_states.view(batch_size, q_len, num_attention_heads, head_dim)
+        # key_states = key_states.view(batch_size, q_len, num_key_value_heads, head_dim)
+        # value_states = value_states.view(batch_size, q_len, num_key_value_heads, head_dim)
 
         # Add keys and values to cache
 
@@ -2030,17 +2038,19 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
 
         # Select attention function
 
-        if not (use_flash_attn or use_xformers) or not attn_params.is_causal():
-            attn_func = self._attn_torch
-        elif use_flash_attn:
-            attn_func = self._attn_flash
-        else:
-            attn_func = self._attn_xformers
+        # TODO add other _attn_torch
+
+        # if not (use_flash_attn or use_xformers) or not attn_params.is_causal():
+        attn_func = self._attn_torch
+        # elif use_flash_attn:
+        #     attn_func = self._attn_flash
+        # else:
+        #     attn_func = self._attn_xformers
 
         # Attention
 
         attn_output = attn_func(batch_size, q_len, query_states, key_states, value_states, attn_params, cfg)
-
+        
         # Update 8-bit/Q4 cache
 
         if cache is not None:

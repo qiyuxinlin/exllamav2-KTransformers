@@ -38,7 +38,7 @@ from exllamav2.linear import ExLlamaV2Linear
 from exllamav2.module import ExLlamaV2Module
 from exllamav2.rmsnorm import ExLlamaV2RMSNorm
 from exllamav2.layernorm import ExLlamaV2LayerNorm
-from exllamav2.attn import ExLlamaV2Attention, has_flash_attn, has_xformers
+from exllamav2.attn import ExLlamaV2Attention, ExLlamaV2DeepSeekAttention, has_flash_attn, has_xformers
 from exllamav2.lora import ExLlamaV2Lora
 from exllamav2.mlp import ExLlamaV2MLP
 from exllamav2.moe_mlp import ExLlamaV2MoEMLP, ExLlamaV2MoEShareMLP, ExLlamaV2DeepSeekMLP
@@ -229,7 +229,7 @@ class ExLlamaV2:
                 if self.config.arch.arch_string != "DeepseekV2ForCausalLM":
                     attn = ExLlamaV2Attention(self, layer_key, layer_idx)
                 else:
-                    attn = None
+                    attn = ExLlamaV2DeepSeekAttention(self, layer_key, layer_idx)
                 if self.config.arch.is_moe: 
                     if self.config.arch.arch_string == "Qwen2MoeForCausalLM":
                         mlp = ExLlamaV2MoEShareMLP(self, layer_key, layer_idx)
@@ -286,6 +286,7 @@ class ExLlamaV2:
         while True:
             layer_idx -= 1
             if isinstance(self.modules[layer_idx], ExLlamaV2Attention) or \
+               isinstance(self.modules[layer_idx], ExLlamaV2DeepSeekAttention) or \
                isinstance(self.modules[layer_idx], ExLlamaV2ParallelDecoder):
                 break
 
@@ -331,7 +332,7 @@ class ExLlamaV2:
             # Special case for attention
 
             attn_bytes_current = 0
-            if isinstance(module, ExLlamaV2Attention): attn_bytes_current = module.temp_attn_size()
+            if isinstance(module, ExLlamaV2Attention) or isinstance(module, ExLlamaV2DeepSeekAttention): attn_bytes_current = module.temp_attn_size()
 
             # Advance current_idx until module fits in allocation
 
@@ -499,7 +500,10 @@ class ExLlamaV2:
             hidden_state = torch.zeros((1, self.config.max_input_len), dtype = torch.long)
             batch_size, seq_len = hidden_state.shape
             past_len = 0
-            attn_params = ExLlamaV2Attention.Params(batch_size, seq_len, past_len, None, None)
+            if self.config.arch.arch_string != "DeepseekV2ForCausalLM":
+                attn_params = ExLlamaV2Attention.Params(batch_size, seq_len, past_len, None, None)
+            else:
+                attn_params = ExLlamaV2DeepSeekAttention.Params(batch_size, seq_len, past_len, None, None)
 
             # Size of fixed scratch space
 
@@ -549,6 +553,7 @@ class ExLlamaV2:
 
                     try:
                         if isinstance(module, ExLlamaV2Attention) or \
+                           isinstance(module, ExLlamaV2DeepSeekAttention) or \
                            isinstance(module, ExLlamaV2ParallelDecoder):
                             self.cache_map[module.layer_idx] = module.device()
                             cache.update_cache_tensors()
@@ -627,6 +632,7 @@ class ExLlamaV2:
 
         for module in self.modules:
             if isinstance(module, ExLlamaV2Attention) or \
+               isinstance(module, ExLlamaV2DeepSeekAttention) or \
                isinstance(module, ExLlamaV2ParallelDecoder):
                 self.cache_map[module.layer_idx] = module.device()
 
@@ -672,6 +678,7 @@ class ExLlamaV2:
 
         for module in self.modules:
             if isinstance(module, ExLlamaV2Attention): module.update_loras()
+            if isinstance(module, ExLlamaV2DeepSeekAttention): module.update_loras()
             if isinstance(module, ExLlamaV2MLP): module.update_loras()
             if isinstance(module, ExLlamaV2MoEMLP): module.update_loras()
 
@@ -679,7 +686,7 @@ class ExLlamaV2:
     def is_quant(self) -> bool:
 
         for module in self.modules:
-            if isinstance(module, ExLlamaV2Attention):
+            if isinstance(module, ExLlamaV2Attention) or isinstance(module, ExLlamaV2DeepSeekAttention):
                 if module.is_quant(): return True
 
         return False
@@ -858,7 +865,7 @@ class ExLlamaV2:
                       return_last_state: bool = False,
                       position_offsets: torch.Tensor | None = None,
                       abort_event: threading.Event | None = None,
-                      attn_params: ExLlamaV2Attention.Params | None = None,
+                      attn_params: ExLlamaV2Attention.Params | ExLlamaV2DeepSeekAttention.Params | None = None,
                       extract_state_indices: list[int] | None = None,
                       **kwargs) \
         -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -891,9 +898,12 @@ class ExLlamaV2:
         x = input_ids
 
         if not attn_params:
-            attn_params = ExLlamaV2Attention.Params(batch_size, seq_len, past_len, input_mask, position_offsets)
+            if self.config.arch.arch_string != "DeepseekV2ForCausalLM":
+                attn_params = ExLlamaV2Attention.Params(batch_size, seq_len, past_len, input_mask, position_offsets)
+            else:
+                attn_params = ExLlamaV2DeepSeekAttention.Params(batch_size, seq_len, past_len, input_mask, position_offsets)
         else:
-            if not isinstance(attn_params, ExLlamaV2Attention.PagedParams):
+            if not isinstance(attn_params, ExLlamaV2Attention.PagedParams) and ExLlamaV2DeepSeekAttention.PagedParams:
                 past_len = attn_params.past_len
                 cache.current_seq_len = past_len
 

@@ -45,7 +45,6 @@ class ExLlamaV2MoEMLP(ExLlamaV2Module):
         intermediate_size = cfg.intermediate_size
         self.num_experts = cfg.num_experts
         self.num_experts_per_token = cfg.num_experts_per_token
-        self.topk_method = cfg.topk_method
 
         if cfg.arch.norm == "layernorm":
             self.post_attention_layernorm = ExLlamaV2LayerNorm(model, key + self.model.config.arch.norm_key_2)
@@ -394,9 +393,9 @@ class ExLlamaV2MoEShareMLP(ExLlamaV2Module):
         elif cfg.arch.norm == "rmsnorm":
             self.post_attention_layernorm = ExLlamaV2RMSNorm(model, key + self.model.config.arch.norm_key_2)
 
-        w1_key = key + cfg.arch.mlp_key_gate
-        w2_key = key + cfg.arch.mlp_key_down
-        w3_key = key + cfg.arch.mlp_key_up
+        w1_key = key + cfg.arch.mlp_expert_key_gate
+        w2_key = key + cfg.arch.mlp_expert_key_down
+        w3_key = key + cfg.arch.mlp_expert_key_up
         w1_f_key = w1_key.replace(".*.", ".")
         w2_f_key = w2_key.replace(".*.", ".")
         w3_f_key = w3_key.replace(".*.", ".")
@@ -756,9 +755,9 @@ class ExLlamaV2DeepSeekMLP(ExLlamaV2Module):
         elif cfg.arch.norm == "rmsnorm":
             self.post_attention_layernorm = ExLlamaV2RMSNorm(model, key + self.model.config.arch.norm_key_2)
 
-        w1_key = key + cfg.arch.mlp_key_gate
-        w2_key = key + cfg.arch.mlp_key_down
-        w3_key = key + cfg.arch.mlp_key_up
+        w1_key = key + cfg.arch.mlp_expert_key_gate
+        w2_key = key + cfg.arch.mlp_expert_key_down
+        w3_key = key + cfg.arch.mlp_expert_key_up
         w1_f_key = w1_key.replace(".*.", ".")
         w2_f_key = w2_key.replace(".*.", ".")
         w3_f_key = w3_key.replace(".*.", ".")
@@ -1002,13 +1001,13 @@ class ExLlamaV2DeepSeekMLP(ExLlamaV2Module):
         routing_weights = routing_weights.to(hidden_states.dtype)
 
         # follow by modeling_deeoseek moe_infer, don't understand
-        cnts = selected_experts.new_zeros((selected_experts.shap[0], self.num_experts))
+        cnts = selected_experts.new_zeros((selected_experts.shape[0], self.num_experts))
         cnts.scatter_(1, selected_experts, 1)
         tokens_per_expert = cnts.sum(dim=0)
         idxs = selected_experts.view(-1).argsort()
         sorted_tokens = hidden_states[idxs // selected_experts.shape[1]]
         sorted_tokens_shape = sorted_tokens.shape
-        if self.ep_size > 1:
+        if self.ep_size is not None and self.ep_size > 1:
             raise NotImplementedError
         tokens_per_expert = tokens_per_expert.cpu().numpy()
 
@@ -1033,7 +1032,7 @@ class ExLlamaV2DeepSeekMLP(ExLlamaV2Module):
             outputs.append(current_hidden_states)
             start_idx = end_idx
         outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
-        if self.ep_size > 1:
+        if self.ep_size is not None and self.ep_size > 1:
             raise NotImplementedError
         new_x = torch.empty_like(outs)
         new_x[idxs] = outs
