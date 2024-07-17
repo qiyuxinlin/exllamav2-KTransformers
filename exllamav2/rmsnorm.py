@@ -24,7 +24,6 @@ class ExLlamaV2RMSNorm(ExLlamaV2Module):
         self.bias = None
         self.variance_epsilon = 1e-6
 
-
     @torch.inference_mode
     def load(self):
 

@@ -104,6 +104,23 @@ class ExLlamaV2Config:
 
     checkpoint_fused_mlp: bool
 
+    first_expert_layer:int
+    n_shared_expert:int
+    topk_method:str
+    n_group:int | None
+    topk_group:int | None
+    routed_scaling_factor:float | None
+    seq_aux:bool | None
+    aux_loss_alpha:float | None
+    ep_size:int | None
+    qk_rope_head_dim:int | None
+    attention_dropout:float | None
+    q_lora_rank:int | None
+    qk_rope_head_dim:int | None
+    kv_lora_rank:int | None
+    v_head_dim:int | None
+    qk_nope_head_dim:int | None
+
     norm_topk_prob = True
     mlp_share_experts_bias = False
     def __init__(self,
@@ -228,13 +245,37 @@ class ExLlamaV2Config:
             default_intermediate_size = no_default
 
         self.intermediate_size = read(read_config, int, ["intermediate_size", "ffn_config->ffn_hidden_size", "n_inner"], default_intermediate_size)
-        #Qwen2 add config
-        if self.arch.arch_string == "Qwen2MoeForCausalLM":
-            self.shared_expert_intermediate_size = read(read_config, int, ["shared_expert_intermediate_size"], self.intermediate_size)
+        # add config
+
+        self.first_expert_layer = read(read_config, int, ["first_k_dense_replace"], 0)
+
+        # Qwen2 add config
+
+        if self.arch.arch_string == "Qwen2MoeForCausalLM" or self.arch.arch_string == "DeepseekV2ForCausalLM":
+            self.n_shared_expert = read(read_config, int, ["n_shared_experts"], 1)
             self.intermediate_size = read(read_config, int, ["moe_intermediate_size"], self.intermediate_size)
+            self.shared_expert_intermediate_size = read(read_config, int, ["shared_expert_intermediate_size"], self.n_shared_expert * self.intermediate_size)
             self.norm_topk_prob = read(read_config, bool, ["norm_topk_prob"], True)
-        self.num_experts = read(read_config, int, ["num_local_experts", "ffn_config->moe_num_experts", "num_experts"], None)
-        self.num_experts_per_token = read(read_config, int,["num_experts_per_tok", "ffn_config->moe_top_k"], None)
+            self.topk_method = read(read_config,str, ["topk_method"],"greedy")
+            self.n_group = read(read_config, int, ["n_group"], None)
+            self.topk_group = read(read_config, int, ["topk_group"], None)
+            self.routed_scaling_factor = read(read_config, float, ["routed_scaling_factor"], None)
+            self.seq_aux = read(read_config, bool, ["seq_aux"], None)
+            self.aux_loss_alpha = read(read_config, float, ["aux_loss_alpha"], None)
+            self.ep_size = read(read_config, int, ["ep_size"], None)
+            self.qk_rope_head_dim = read(read_config, int, ["qk_rope_head_dim"], None)
+            self.attention_dropout = read(read_config, float, ["attention_dropout"], 0)
+            self.q_lora_rank = read(read_config, int, ["q_lora_rank"], None)
+            self.qk_rope_head_dim = read(read_config, int, ["qk_rope_head_dim"])
+            self.kv_lora_rank = read(read_config, int, ["kv_lora_rank"], None)
+            self.v_head_dim = read(read_config, int, ["v_head_dim"], None)
+            self.qk_nope_head_dim = read(read_config, int, ["qk_nope_head_dim"], None)
+            self.arch.attention_bias_o = read(read_config, int, ["attention_bias"], self.arch.attention_bias_o)
+        self.num_experts = read(read_config, int, ["num_local_experts", "ffn_config->moe_num_experts", "num_experts", "n_routed_experts"], None)
+        self.num_experts_per_token = read(read_config, int,["num_experts_per_tok", "ffn_config->moe_top_k",], None)
+
+        # DeepSeek add config
+
 
         # Logit/embedding/residual scale
 
@@ -321,6 +362,8 @@ class ExLlamaV2Config:
 
         for layer_idx in range(self.num_hidden_layers):
             for ks in per_layer_keys:
+                if (ks[0].startswith("mlp.experts") or ks[0].startswith("mlp.gate") or ks[0].startswith("mlp.shared_expert")) and layer_idx < self.first_expert_layer:
+                    continue
                 prefixes = [f"model.layers.{layer_idx}.{k}" for k in ks]
                 expect_keys.append(prefixes)
 

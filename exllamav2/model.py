@@ -41,7 +41,7 @@ from exllamav2.layernorm import ExLlamaV2LayerNorm
 from exllamav2.attn import ExLlamaV2Attention, has_flash_attn, has_xformers
 from exllamav2.lora import ExLlamaV2Lora
 from exllamav2.mlp import ExLlamaV2MLP
-from exllamav2.moe_mlp import ExLlamaV2MoEMLP, ExLlamaV2MoEShareMLP
+from exllamav2.moe_mlp import ExLlamaV2MoEMLP, ExLlamaV2MoEShareMLP, ExLlamaV2DeepSeekMLP
 from exllamav2.parallel_decoder import ExLlamaV2ParallelDecoder
 from exllamav2.embedding import ExLlamaV2Embedding
 from exllamav2.pos_embedding import ExLlamaV2PosEmbedding
@@ -226,10 +226,18 @@ class ExLlamaV2:
                 pd = ExLlamaV2ParallelDecoder(self, layer_key, layer_idx)
                 self.modules += [pd]
             else:
-                attn = ExLlamaV2Attention(self, layer_key, layer_idx)
+                if self.config.arch.arch_string != "DeepseekV2ForCausalLM":
+                    attn = ExLlamaV2Attention(self, layer_key, layer_idx)
+                else:
+                    attn = None
                 if self.config.arch.is_moe: 
-                    if hasattr(self.config, 'shared_expert_intermediate_size'):
+                    if self.config.arch.arch_string == "Qwen2MoeForCausalLM":
                         mlp = ExLlamaV2MoEShareMLP(self, layer_key, layer_idx)
+                    elif self.config.arch.arch_string == "DeepseekV2ForCausalLM":
+                        if hasattr(self.config, 'shared_expert_intermediate_size') and layer_idx >= self.config.first_expert_layer:
+                            mlp = ExLlamaV2DeepSeekMLP(self, layer_key, layer_idx)
+                        else:
+                            mlp = ExLlamaV2MLP(self, layer_key, layer_idx)
                     else:
                         mlp = ExLlamaV2MoEMLP(self, layer_key, layer_idx)
                 else: mlp = ExLlamaV2MLP(self, layer_key, layer_idx)
