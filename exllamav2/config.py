@@ -116,7 +116,6 @@ class ExLlamaV2Config:
     qk_rope_head_dim:int | None
     attention_dropout:float | None
     q_lora_rank:int | None
-    qk_rope_head_dim:int | None
     kv_lora_rank:int | None
     v_head_dim:int | None
     qk_nope_head_dim:int | None
@@ -267,7 +266,6 @@ class ExLlamaV2Config:
             self.qk_rope_head_dim = read(read_config, int, ["qk_rope_head_dim"], None)
             self.attention_dropout = read(read_config, float, ["attention_dropout"], 0)
             self.q_lora_rank = read(read_config, int, ["q_lora_rank"], None)
-            self.qk_rope_head_dim = read(read_config, int, ["qk_rope_head_dim"])
             self.kv_lora_rank = read(read_config, int, ["kv_lora_rank"], None)
             self.v_head_dim = read(read_config, int, ["v_head_dim"], None)
             self.qk_nope_head_dim = read(read_config, int, ["qk_nope_head_dim"], None)

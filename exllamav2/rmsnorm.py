@@ -89,6 +89,26 @@ class ExLlamaV2RMSNorm(ExLlamaV2Module):
         return 0
 
 
+    # def forward(self,
+    #             hidden_states: torch.Tensor,
+    #             cache = None,
+    #             attn_params = None,
+    #             past_len = None,
+    #             intermediates: bool = False,
+    #             loras = None,
+    #             **kwargs) -> torch.Tensor | dict[str: torch.Tensor]:
+
+    #     output_shape = hidden_states.shape
+    #     hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+    #     norm = torch.empty_like(hidden_states)
+    #     ext_c.rms_norm(hidden_states, self.weight, norm, self.variance_epsilon)
+    #     hidden_states = norm.view(output_shape)
+
+    #     if intermediates:
+    #         return {"hidden_states": hidden_states}
+    #     else:
+    #         return hidden_states
+
     def forward(self,
                 hidden_states: torch.Tensor,
                 cache = None,
@@ -98,12 +118,14 @@ class ExLlamaV2RMSNorm(ExLlamaV2Module):
                 loras = None,
                 **kwargs) -> torch.Tensor | dict[str: torch.Tensor]:
 
-        output_shape = hidden_states.shape
-        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        norm = torch.empty_like(hidden_states)
-        ext_c.rms_norm(hidden_states, self.weight, norm, self.variance_epsilon)
-        hidden_states = norm.view(output_shape)
-
+        input_dtype = hidden_states.dtype
+        hidden_states[hidden_states == -float('inf')] = -65504.0
+        hidden_states[hidden_states == float('inf')] = 65504.0
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim = True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        hidden_states = self.weight.to(torch.bfloat16) * hidden_states.to(torch.bfloat16)
+        hidden_states = hidden_states.to(input_dtype)
         if intermediates:
             return {"hidden_states": hidden_states}
         else:

@@ -4,13 +4,14 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from exllamav2 import ExLlamaV2, ExLlamaV2Config, ExLlamaV2Cache, ExLlamaV2Tokenizer, Timer, ExLlamaV2DeppSeekCache
 from exllamav2.generator import ExLlamaV2DynamicGenerator
-
-model_dir = "/data/model/Mistral-87B-Instruct-v0.1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+# model_dir = "/data/model/Mistral-87B-Instruct-v0.1"
 # model_dir = "/data/model/DeepSeek-V2-Lite-Chat"
+# model_dir = "/data/model/DeepSeek-V2-Lite-gptq-4bit"
 # model_dir = "/data/model/Qwen1.5-MoE-A2.7B-Chat"
 # model_dir = "/data/model/Qwen1.5-7B-Chat"
 # model_dir = "/data/model/Qwen2-57B-A14B-Instruct"
-# model_dir = "/data/model/Qwen2-57B-A14B-Instruct-GPTQ-Int4" 
+model_dir = "/data/model/Qwen2-57B-A14B-Instruct-GPTQ-Int4" 
 config = ExLlamaV2Config(model_dir)
 model = ExLlamaV2(config)
 cache = ExLlamaV2Cache(model, max_seq_len = 4096, lazy = True)
@@ -35,14 +36,15 @@ max_new_tokens = 250
 # autotune before we do any timing measurements. It can be a little slow for larger models and is not needed
 # to produce correct output.
 
-generator.warmup()
+# generator.warmup()
 
 # Generate one completion, using default settings
 # prompt = "<im_start>user\n你好，请问你能做什么?<im_end>\n<im_start>assistant\n"
-prompt = "你好，请问你能做什么,"
+prompt = "你好，请问你能做什么"
+# prompt = "<｜begin▁of▁sentence｜>User: 你好，请问你能做什么\n\nAssistant:"
 
 with Timer() as t_single:
-    output = generator.generate(prompt = prompt, max_new_tokens = max_new_tokens, add_bos = True, encode_special_tokens=True,decode_special_tokens=True,stop_conditions=['<im_end>',151645])
+    output = generator.generate(prompt = prompt, max_new_tokens = max_new_tokens, add_bos = False, encode_special_tokens=True,decode_special_tokens=True,stop_conditions=['<im_end>',151645])
 
 print("-----------------------------------------------------------------------------------")
 print("- Single completion")

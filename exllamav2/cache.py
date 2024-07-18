@@ -294,7 +294,6 @@ class ExLlamaV2DeppSeekCache(ExLlamaV2CacheBase):
         self.shape_wv = (self.batch_size, self.max_seq_len, self.num_key_value_heads, self.v_head_dim)
         self.create_state_tensors(copy_from, lazy)
 
-
     def get_kv_state(self,
                      layer_idx: int,
                      batch_size: int,
