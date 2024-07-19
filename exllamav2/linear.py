@@ -214,7 +214,7 @@ class ExLlamaV2Linear(ExLlamaV2Module):
     def temp_dq_size(self) -> int:
 
         dq = self.in_features * self.out_features
-        dq = min(dq, self.model.config.max_dq_size)
+        dq = max(dq, self.model.config.max_dq_size)
         dq = dq * 2 + 128
         return dq
 
@@ -238,8 +238,19 @@ class ExLlamaV2Linear(ExLlamaV2Module):
                 **kwargs) -> torch.Tensor | dict[str: torch.Tensor]:
 
         # Linear forward
-
-        if self.q_handle is not None and not force_recons:
+        if 'shape' in kwargs.keys():
+            matrix = self.get_weight_tensor_dq()
+            matrix = matrix.T.contiguous().view(kwargs['shape'])
+            if 'transpose' in kwargs.keys():
+                dim1,dim2 = kwargs['transpose']
+                matrix = matrix.mT.contiguous()
+            hidden_states_out = torch.matmul(hidden_states, matrix)
+            if self.has_bias:
+                bias = self.get_bias_tensor()
+                hidden_states_out += bias
+            if self.prescale != 1:
+                hidden_states_out.mul_(self.prescale)
+        elif self.q_handle is not None and not force_recons:
 
             output_shape = hidden_states.shape[:-1] + (self.out_features,)
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])

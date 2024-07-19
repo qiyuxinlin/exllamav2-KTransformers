@@ -16,7 +16,7 @@ import math
 # from exllamav2.util import list_live_tensors, set_snapshot, diff_snapshot, print_vram_usage_peak
 import torch.nn.functional as F
 # from line_profiler import profile
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Tuple
 if TYPE_CHECKING:
     from exllamav2.model import ExLlamaV2
 # import rope
@@ -1076,6 +1076,8 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
     kv_a_proj_with_mqa: ExLlamaV2Linear | None
     kv_b_proj: ExLlamaV2Linear | None
     o_proj: ExLlamaV2Linear | None
+    q_absorb: ExLlamaV2Linear | None
+    out_absorb: ExLlamaV2Linear | None
     q_a_layernorm: ExLlamaV2HeadNorm | None
     kv_a_layernorm: ExLlamaV2HeadNorm | None
     attention_dropout: float
@@ -1368,7 +1370,9 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
         self.kv_a_layernorm = ExLlamaV2RMSNorm(model, key + ".self_attn.kv_a_layernorm")
         self.kv_b_proj = ExLlamaV2Linear(model, key + ".self_attn.kv_b_proj", self.kv_lora_rank, self.num_heads*(self.q_head_dim - self.qk_rope_head_dim + self.v_head_dim), has_bias=False, f_key=None)
         self.o_proj = ExLlamaV2Linear(model, key + ".self_attn.o_proj", self.num_heads * self.v_head_dim, hidden_size, has_bias=cfg.arch.attention_bias_o, f_key=None)
-       
+        self.q_absorb = ExLlamaV2Linear(model,key + ".self_attn.q_absorb", self.kv_lora_rank, self.num_heads * self.qk_nope_head_dim, has_bias=False, f_key=None)
+        self.out_absorb = ExLlamaV2Linear(model, key + ".self_attn.out_absorb", self.kv_lora_rank, self.num_heads * self.v_head_dim, has_bias=False, f_key=None)
+
         self._init_rope()
         self.softmax_scale = self.q_head_dim ** (-0.5)
         #TODO add rope_scaling
@@ -1444,6 +1448,17 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
         self.kv_b_proj.load()
         self.o_proj.load()
 
+        if self.kv_b_proj.q_handle == None:
+            kv_b_proj = self.kv_b_proj.linear.weight.view(self.num_heads, -1, self.kv_lora_rank)
+            q_absorb = nn.Parameter(kv_b_proj[:, :self.qk_nope_head_dim, :].reshape(-1, self.kv_lora_rank))
+            out_absorb = nn.Parameter(kv_b_proj[:, self.qk_nope_head_dim:, :].reshape(-1, self.kv_lora_rank))
+        else:
+            kv_b_proj = self.kv_b_proj.get_weight_tensor_dq().T.view(self.num_heads, -1, self.kv_lora_rank)
+            q_absorb = nn.Parameter(kv_b_proj[:, :self.qk_nope_head_dim, :].reshape(-1, self.kv_lora_rank))
+            out_absorb = nn.Parameter(kv_b_proj[:, self.qk_nope_head_dim:, :].reshape(-1, self.kv_lora_rank))
+        self.q_absorb.load(q_absorb)
+        self.out_absorb.load(out_absorb)
+        self.kv_b_proj.unload()
         # TODO quant
 
     def unload(self):
@@ -1463,8 +1478,11 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
 
         self.kv_a_proj_with_mqa.unload()
         self.kv_a_layernorm.unload()
-        self.kv_b_proj.unload()
+        # self.kv_b_proj.unload()
         self.o_proj.unload()
+
+        self.q_absorb.unload()
+        self.out_absorb.unload()
         # TODO quant
 
     def weight_footprint(self):
@@ -1583,6 +1601,10 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
         self.kv_a_proj_with_mqa.set_device_idx(idx)
         self.kv_a_layernorm.set_device_idx(idx)
         self.kv_b_proj.set_device_idx(idx)
+
+        # TODO delete kv_b_proj
+        self.q_absorb.set_device_idx(idx)
+        self.out_absorb.set_device_idx(idx)
         self.o_proj.set_device_idx(idx)
 
 
@@ -1948,7 +1970,7 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
 
         return hidden_states
 
-
+        
     def forward_torch(self,
                       hidden_states: torch.Tensor,
                       cache: ExLlamaV2CacheBase | None = None,
@@ -1987,74 +2009,42 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
         compressed_kv, k_pe = torch.split(
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
+        compressed_kv = self.kv_a_layernorm.forward(compressed_kv)
         k_pe = k_pe.view(batch_size, q_len, 1, self.qk_rope_head_dim).transpose(1, 2)
-        kv = (
-            self.kv_b_proj.forward(self.kv_a_layernorm.forward(compressed_kv), loras = loras)
-            .view(batch_size, q_len, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-            .transpose(1, 2)
-        )
-        k_nope, value_states = torch.split(
-            kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
-        )
-        kv_seq_len = value_states.shape[-2]
+        kv_seq_len = k_pe.shape[-2]
         kv_seq_len += past_len
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        cos, sin = self.rotary_emb(q_pe, seq_len=kv_seq_len)
         position_ids = torch.arange(past_len, past_len + q_len)[None,:].expand(batch_size,q_len)
         q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin, position_ids)
-        query_states = k_pe.new_empty(batch_size, self.num_heads, q_len, self.q_head_dim)
-        query_states[:, :, :, : self.qk_nope_head_dim] = q_nope
-        query_states[:, :, :, self.qk_nope_head_dim :] = q_pe
-
-        key_states = k_pe.new_empty(batch_size, self.num_heads, q_len, self.q_head_dim)
-        key_states[:, :, :, : self.qk_nope_head_dim] = k_nope
-        key_states[:, :, :, self.qk_nope_head_dim :] = k_pe
-
-        query_states = query_states.transpose(1, 2)
-        key_states = key_states.transpose(1, 2)
-        value_states = value_states.transpose(1, 2)        
-        # Shape for attention
-
-        # query_states = query_states.view(batch_size, q_len, num_attention_heads, head_dim)
-        # key_states = key_states.view(batch_size, q_len, num_key_value_heads, head_dim)
-        # value_states = value_states.view(batch_size, q_len, num_key_value_heads, head_dim)
-
-        # Add keys and values to cache
 
         if cache is not None:
-
             batch_keys, batch_values = cache.get_kv_state(self.layer_idx, batch_size, 0, past_len)
-            new_keys = batch_keys.narrow(1, past_len, q_len).narrow(0, 0, batch_size)
-            new_values = batch_values.narrow(1, past_len, q_len).narrow(0, 0, batch_size)
-            new_keys.copy_(key_states)
-            new_values.copy_(value_states)
+            new_keys = batch_keys.narrow(-2, past_len, q_len).narrow(0, 0, batch_size)
+            new_values = batch_values.narrow(-2, past_len, q_len).narrow(0, 0, batch_size)
+            new_keys.copy_(compressed_kv)
+            new_values.copy_(k_pe)
 
             # Key/value tensors with past
 
-            key_states = batch_keys.narrow(1, 0, past_len + q_len).narrow(0, 0, batch_size)
-            value_states = batch_values.narrow(1, 0, past_len + q_len).narrow(0, 0, batch_size)
+            compressed_kv = batch_keys.narrow(-2, 0, past_len + q_len).narrow(0, 0, batch_size)
+            k_pe = batch_values.narrow(-2, 0, past_len + q_len).narrow(0, 0, batch_size)
+        q_nope= self.q_absorb.forward(q_nope,shape=[self.num_heads, self.qk_nope_head_dim, self.kv_lora_rank])
+        # q_nope = torch.matmul(q_nope, self.q_absorb.linear.weight.view(self.num_heads, self.qk_nope_head_dim, self.kv_lora_rank))
+        attn_weights = (torch.matmul(q_pe, k_pe.mT) + torch.matmul(q_nope, compressed_kv.unsqueeze(-3).mT)) * self.softmax_scale
+        attn_mask = attn_params.get_attn_mask(attn_weights.device)
+        if attn_mask is not None: attn_weights = attn_weights + attn_mask
+        attn_weights = nn.functional.softmax(
+            attn_weights, dim=-1, dtype=torch.float32
+        ).to(q_pe.dtype)
+        attn_weights = nn.functional.dropout(
+            attn_weights, p=self.attention_dropout
+        )
+        attn_output = torch.einsum('bhql,blc->bhqc', attn_weights, compressed_kv)
+        attn_output = self.out_absorb.forward(attn_output, shape=[self.num_heads, self.v_head_dim, self.kv_lora_rank],transpose=[-2,-1])
+        # attn_output = torch.matmul(attn_output, self.out_absorb.linear.weight.view(self.num_heads, self.v_head_dim, self.kv_lora_rank).mT) 
+        attn_output = attn_output.transpose(1, 2).contiguous()
 
-        use_flash_attn = has_flash_attn and not cfg.no_flash_attn
-        use_xformers = has_xformers and not cfg.no_xformers
-
-        # Select attention function
-
-        # TODO add other _attn_torch
-
-        # if not (use_flash_attn or use_xformers) or not attn_params.is_causal():
-        attn_func = self._attn_torch
-        # elif use_flash_attn:
-        #     attn_func = self._attn_flash
-        # else:
-        #     attn_func = self._attn_xformers
-
-        # Attention
-
-        attn_output = attn_func(batch_size, q_len, query_states, key_states, value_states, attn_params, cfg)
-        
-        # Update 8-bit/Q4 cache
-
-        if cache is not None:
-            cache.store_kv_state(self.layer_idx, batch_size, past_len, q_len)
+        attn_output = attn_output.reshape(batch_size, q_len, self.num_heads * self.v_head_dim)
 
         # Output projection
 

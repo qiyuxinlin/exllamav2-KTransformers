@@ -4,18 +4,18 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from exllamav2 import ExLlamaV2, ExLlamaV2Config, ExLlamaV2Cache, ExLlamaV2Tokenizer, Timer, ExLlamaV2DeppSeekCache
 from exllamav2.generator import ExLlamaV2DynamicGenerator
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 # model_dir = "/data/model/Mistral-87B-Instruct-v0.1"
 # model_dir = "/data/model/DeepSeek-V2-Lite-Chat"
-# model_dir = "/data/model/DeepSeek-V2-Lite-gptq-4bit"
+model_dir = "/data/model/DeepSeek-V2-Lite-gptq-4bit"
 # model_dir = "/data/model/Qwen1.5-MoE-A2.7B-Chat"
 # model_dir = "/data/model/Qwen1.5-7B-Chat"
 # model_dir = "/data/model/Qwen2-57B-A14B-Instruct"
-model_dir = "/data/model/Qwen2-57B-A14B-Instruct-GPTQ-Int4" 
+# model_dir = "/data/model/Qwen2-57B-A14B-Instruct-GPTQ-Int4" 
 config = ExLlamaV2Config(model_dir)
 model = ExLlamaV2(config)
-cache = ExLlamaV2Cache(model, max_seq_len = 4096, lazy = True)
-# cache = ExLlamaV2DeppSeekCache(model, max_seq_len = 4096, lazy = True)
+# cache = ExLlamaV2Cache(model, max_seq_len = 4096, lazy = True)
+cache = ExLlamaV2DeppSeekCache(model, max_seq_len = 4096, lazy = True)
 model.load_autosplit(cache, progress = True)
 
 print("Loading tokenizer...")

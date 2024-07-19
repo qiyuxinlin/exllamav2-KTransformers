@@ -131,8 +131,8 @@ class ExLlamaV2Config:
         """
 
         self.max_batch_size = 1
-        self.max_input_len = 2048
-        self.max_attention_size = 2048**2
+        self.max_input_len = 1000
+        self.max_attention_size = 1000**2
         self.max_output_len = None
         self.scale_pos_emb = 1.0
         self.scale_alpha_value = 1.0
@@ -152,7 +152,8 @@ class ExLlamaV2Config:
         else:
             self.model_dir = None
 
-        self.max_dq_size = 512*(1024**2)
+        # self.max_dq_size = 512*(1024**2)
+        self.max_dq_size = 512*(2048**2)
 
 
     # Set low-mem options
