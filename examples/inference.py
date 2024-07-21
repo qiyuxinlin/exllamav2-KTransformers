@@ -6,8 +6,8 @@ from exllamav2 import ExLlamaV2, ExLlamaV2Config, ExLlamaV2Cache, ExLlamaV2Token
 from exllamav2.generator import ExLlamaV2DynamicGenerator
 os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 # model_dir = "/data/model/Mistral-87B-Instruct-v0.1"
-# model_dir = "/data/model/DeepSeek-V2-Lite-Chat"
-model_dir = "/data/model/DeepSeek-V2-Lite-gptq-4bit"
+model_dir = "/data/model/DeepSeek-V2-Lite-Chat"
+# model_dir = "/data/model/DeepSeek-V2-Lite-gptq-4bit"
 # model_dir = "/data/model/Qwen1.5-MoE-A2.7B-Chat"
 # model_dir = "/data/model/Qwen1.5-7B-Chat"
 # model_dir = "/data/model/Qwen2-57B-A14B-Instruct"
