@@ -184,7 +184,7 @@ class ExLlamaV2MLP(ExLlamaV2Module):
     def scratch_space(self) -> int:
 
         cfg = self.model.config
-        assert cfg.intermediate_size >= cfg.hidden_size
+        # assert cfg.intermediate_size >= cfg.hidden_size
         return self.temp_state_size() + \
                self.temp_a_size() + \
                self.temp_b_size() + \

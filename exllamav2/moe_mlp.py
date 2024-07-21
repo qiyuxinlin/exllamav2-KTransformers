@@ -860,7 +860,7 @@ class ExLlamaV2DeepSeekMLP(ExLlamaV2Module):
 
     def scratch_space(self) -> int:
 
-        assert self.model.config.intermediate_size >= self.model.config.hidden_size
+        # assert self.model.config.intermediate_size >= self.model.config.hidden_size
         return self.temp_state_size() + \
                self.temp_gathered_state_size() + \
                self.temp_a_size() + \

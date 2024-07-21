@@ -4,7 +4,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from exllamav2 import ExLlamaV2, ExLlamaV2Config, ExLlamaV2Cache, ExLlamaV2Tokenizer, Timer, ExLlamaV2DeppSeekCache
 from exllamav2.generator import ExLlamaV2DynamicGenerator
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 # model_dir = "/data/model/Mistral-87B-Instruct-v0.1"
 # model_dir = "/data/model/DeepSeek-V2-Lite-Chat"
 model_dir = "/data/model/DeepSeek-V2-Lite-gptq-4bit"

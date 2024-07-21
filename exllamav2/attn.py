@@ -1445,20 +1445,57 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
 
         self.kv_a_proj_with_mqa.load()
         self.kv_a_layernorm.load()
-        self.kv_b_proj.load()
+        # self.kv_b_proj.load()
         self.o_proj.load()
+        kv_b_proj_w = self.kv_b_proj.load_weight()
+        if isinstance(kv_b_proj_w, nn.Parameter):
+            kv_b_proj_w = kv_b_proj_w.view(self.num_heads, -1, self.kv_lora_rank)
+            q_absorb = nn.Parameter(kv_b_proj_w[:, :self.qk_nope_head_dim, :].reshape(-1, self.kv_lora_rank))
+            out_absorb = nn.Parameter(kv_b_proj_w[:, self.qk_nope_head_dim:, :].reshape(-1, self.kv_lora_rank))
+        elif isinstance(kv_b_proj_w, dict):
+            # self.kv_b_proj.load(kv_b_proj_w)
+            # kv_b_proj = self.kv_b_proj.get_weight_tensor_dq().T.view(self.num_heads, -1, self.kv_lora_rank)
+            # q_absorb = nn.Parameter(kv_b_proj[:, :self.qk_nope_head_dim, :].reshape(-1, self.kv_lora_rank))
+            # out_absorb = nn.Parameter(kv_b_proj[:, self.qk_nope_head_dim:, :].reshape(-1, self.kv_lora_rank))
 
-        if self.kv_b_proj.q_handle == None:
-            kv_b_proj = self.kv_b_proj.linear.weight.view(self.num_heads, -1, self.kv_lora_rank)
-            q_absorb = nn.Parameter(kv_b_proj[:, :self.qk_nope_head_dim, :].reshape(-1, self.kv_lora_rank))
-            out_absorb = nn.Parameter(kv_b_proj[:, self.qk_nope_head_dim:, :].reshape(-1, self.kv_lora_rank))
-        else:
-            kv_b_proj = self.kv_b_proj.get_weight_tensor_dq().T.view(self.num_heads, -1, self.kv_lora_rank)
-            q_absorb = nn.Parameter(kv_b_proj[:, :self.qk_nope_head_dim, :].reshape(-1, self.kv_lora_rank))
-            out_absorb = nn.Parameter(kv_b_proj[:, self.qk_nope_head_dim:, :].reshape(-1, self.kv_lora_rank))
+            assert (self.num_heads*self.qk_nope_head_dim) % 32 == 0
+            n_a = self.qk_nope_head_dim
+            qweight = kv_b_proj_w["qweight"].reshape(kv_b_proj_w["qweight"].shape[0],self.num_heads,self.qk_nope_head_dim+self.v_head_dim)
+            qweight_a = qweight[:,:, :n_a].reshape(qweight.shape[0],-1)
+            qweight_b = qweight[:,:, n_a:].reshape(qweight.shape[0],-1)
+
+            qzeros = kv_b_proj_w["qzeros"].reshape(kv_b_proj_w["qzeros"].shape[0],self.num_heads,(self.qk_nope_head_dim+self.v_head_dim)//8)
+            qzeros_a = qzeros[:,:, :n_a // 8].reshape(qzeros.shape[0],-1)
+            qzeros_b = qzeros[:,:, n_a // 8:].reshape(qzeros.shape[0],-1)
+
+            scales = kv_b_proj_w["scales"].reshape(kv_b_proj_w["scales"].shape[0],self.num_heads,self.qk_nope_head_dim+self.v_head_dim)
+            scales_a = scales[:,:, :n_a].reshape(scales.shape[0],-1)
+            scales_b = scales[:,:, n_a:].reshape(scales.shape[0],-1)
+
+            g_idx = kv_b_proj_w["g_idx"]
+            g_idx_a = g_idx
+            g_idx_b = g_idx
+ 
+            q_absorb = {
+                'qweight': qweight_a,
+                'scales' : scales_a,
+                'g_idx' : g_idx_a,
+                'qzeros' : qzeros_a,
+            }
+            out_absorb = {
+                'qweight': qweight_b,
+                'scales' : scales_b,
+                'g_idx' : g_idx_b,
+                'qzeros' : qzeros_b,
+            }
         self.q_absorb.load(q_absorb)
         self.out_absorb.load(out_absorb)
-        self.kv_b_proj.unload()
+        # self.kv_b_proj.load()
+        # original = self.kv_b_proj.get_weight_tensor_dq()
+        # split_a = self.q_absorb.get_weight_tensor_dq()
+        # split_b = self.out_absorb.get_weight_tensor_dq()
+        # combined = torch.cat([split_a, split_b], dim = -1)
+        # print(torch.allclose(original, combined))
         # TODO quant
 
     def unload(self):
@@ -1493,7 +1530,7 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
              self.o_proj.weight_footprint()
         if self.input_layernorm is not None:
             fp += self.input_layernorm.weight_footprint()
-        if self.q_lora_rank is not None:
+        if self.q_lora_rank is None:
             fp += self.q_proj.weight_footprint()
         else:
             fp += self.q_a_proj.weight_footprint()
