@@ -131,8 +131,8 @@ class ExLlamaV2Config:
         """
 
         self.max_batch_size = 1
-        self.max_input_len = 1000
-        self.max_attention_size = 1000**2
+        self.max_input_len = 1024
+        self.max_attention_size = 1024**2
         self.max_output_len = None
         self.scale_pos_emb = 1.0
         self.scale_alpha_value = 1.0
@@ -271,6 +271,8 @@ class ExLlamaV2Config:
             self.v_head_dim = read(read_config, int, ["v_head_dim"], None)
             self.qk_nope_head_dim = read(read_config, int, ["qk_nope_head_dim"], None)
             self.arch.attention_bias_o = read(read_config, int, ["attention_bias"], self.arch.attention_bias_o)
+        if self.arch.arch_string == "DeepseekV2ForCausalLM":
+            self.head_dim = self.qk_rope_head_dim
         self.num_experts = read(read_config, int, ["num_local_experts", "ffn_config->moe_num_experts", "num_experts", "n_routed_experts"], None)
         self.num_experts_per_token = read(read_config, int,["num_experts_per_tok", "ffn_config->moe_top_k",], None)
 

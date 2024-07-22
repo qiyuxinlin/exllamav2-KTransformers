@@ -1687,117 +1687,149 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
         v_cache = v_cache_f.view(v_cache_f.shape[1] // page_size, page_size, v_cache_f.shape[2], v_cache_f.shape[3])
 
         if is_q:
-            q = torch.empty((batch_size, q_len, cfg.num_attention_heads, cfg.head_dim), device = hidden_states.device, dtype = torch.half)
-            if attn_params.is_sequential:
-                assert batch_size == 1
-                k = k_cache_f[:, attn_params.first_index : attn_params.first_index + q_len, :, :]
-                v = v_cache_f[:, attn_params.first_index : attn_params.first_index + q_len, :, :]
-            else:
-                k = torch.empty((batch_size, q_len, cfg.num_key_value_heads, cfg.head_dim), device = hidden_states.device, dtype = torch.half)
-                v = torch.empty((batch_size, q_len, cfg.num_key_value_heads, cfg.head_dim), device = hidden_states.device, dtype = torch.half)
+            raise NotImplementedError
+            # q = torch.empty((batch_size, q_len, cfg.num_attention_heads, cfg.head_dim), device = hidden_states.device, dtype = torch.half)
+            # if attn_params.is_sequential:
+            #     assert batch_size == 1
+            #     k = k_cache_f[:, attn_params.first_index : attn_params.first_index + q_len, :, :]
+            #     v = v_cache_f[:, attn_params.first_index : attn_params.first_index + q_len, :, :]
+            # else:
+            #     k = torch.empty((batch_size, q_len, cfg.num_key_value_heads, cfg.head_dim), device = hidden_states.device, dtype = torch.half)
+            #     v = torch.empty((batch_size, q_len, cfg.num_key_value_heads, cfg.head_dim), device = hidden_states.device, dtype = torch.half)
 
-            if loras is None or self.temp_lora_size == 0:
-                pass_loras = []
-                pass_lora_temp = none_tensor
-            else:
-                pass_loras = [id(x) for x in loras]
-                pass_lora_temp = torch.empty((self.temp_lora_size,), dtype = torch.half, device = hidden_states.device)
+            # if loras is None or self.temp_lora_size == 0:
+            #     pass_loras = []
+            #     pass_lora_temp = none_tensor
+            # else:
+            #     pass_loras = [id(x) for x in loras]
+            #     pass_lora_temp = torch.empty((self.temp_lora_size,), dtype = torch.half, device = hidden_states.device)
 
-            ext_c.q_attn_forward_1(
-                self.q_handle,
-                hidden_states,
-                batch_size,
-                q_len,
-                0,
-                cache_seqlens,
-                q,
-                k,
-                v,
-                constants.sin,
-                constants.cos,
-                pass_loras,
-                pass_lora_temp
-            )
+            # ext_c.q_attn_forward_1(
+            #     self.q_handle,
+            #     hidden_states,
+            #     batch_size,
+            #     q_len,
+            #     0,
+            #     cache_seqlens,
+            #     q,
+            #     k,
+            #     v,
+            #     constants.sin,
+            #     constants.cos,
+            #     pass_loras,
+            #     pass_lora_temp
+            # )
         else:
             residual = hidden_states
-            hidden_states = self.input_layernorm.forward(hidden_states) if self.has_norm else hidden_states
-            q = self.q_proj.forward(hidden_states, loras = loras)
-            k = self.k_proj.forward(hidden_states, loras = loras)
-            v = self.v_proj.forward(hidden_states, loras = loras)
-            q = q.view(batch_size, q_len, cfg.num_attention_heads, cfg.head_dim)
-            k = k.view(batch_size, q_len, cfg.num_key_value_heads, cfg.head_dim)
-            v = v.view(batch_size, q_len, cfg.num_key_value_heads, cfg.head_dim)
-            if cfg.use_qk_norm:
-                q = self.q_norm.forward(q)
-                k = self.k_norm.forward(k)
-            if cfg.arch.rope_style != RopeStyle.NONE:
-                for t, heads in [(q, cfg.num_attention_heads), (k, cfg.num_key_value_heads)]:
-                    ext_c.rope_(
-                        t,
-                        constants.sin,
-                        constants.cos,
-                        0,
-                        heads,
-                        cfg.head_dim,
-                        cache_seqlens,
-                        cfg.arch.rope_style == RopeStyle.NEOX
-                    )
+            post_norm = self.input_layernorm.forward(hidden_states) if self.has_norm else hidden_states
+            if self.q_lora_rank is None:
+                q = self.q_proj.forward(post_norm, loras = loras)
+            else:
+                q = self.q_b_proj.forward(self.q_a_layernorm(self.q_a_proj(post_norm)), loras = loras)
+            q = q.view(batch_size, q_len, self.num_heads, self.q_head_dim).transpose(1, 2)
+            q_nope, q_pe = torch.split(
+            q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
+            compressed_kv = self.kv_a_proj_with_mqa.forward(post_norm, loras = loras)
+            compressed_kv, k_pe = torch.split(
+            compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+            )
+            compressed_kv = self.kv_a_layernorm.forward(compressed_kv)
+            k_pe = k_pe.view(batch_size, q_len, 1, self.qk_rope_head_dim).transpose(1, 2)
+            for bs in range(batch_size):
+                past_len = cache_seqlens[bs].item()
+                cos, sin = self.rotary_emb(q_pe, seq_len=past_len+q_len)
+                position_ids = torch.arange(past_len, past_len + q_len)[None,:]
+
+                q_pe[bs], k_pe[bs] = apply_rotary_pos_emb(q_pe[bs].unsqueeze(0), k_pe[bs].unsqueeze(0), cos, sin, position_ids)
+
             if attn_params.is_sequential:
                 k_ = k_cache_f[:, attn_params.first_index : attn_params.first_index + q_len, :, :]
                 v_ = v_cache_f[:, attn_params.first_index : attn_params.first_index + q_len, :, :]
-                k_.copy_(k)
-                v_.copy_(v)
-
+                compressed_kv = compressed_kv.unsqueeze(2).contiguous()
+                k_pe = k_pe.transpose(1,2).contiguous()
+                k_.copy_(compressed_kv)
+                v_.copy_(k_pe)
+                k_pe = k_pe.transpose(1,2).contiguous()
+                compressed_kv = compressed_kv.squeeze(2).contiguous()
         if attn_params.is_sequential:
-            k = None
-            v = None
+            # compressed_kv = None
+            # k_pe = None
             cache_seqlens_a = attn_params.get_cache_seqlens_after(self.device_idx)
         else:
             cache_seqlens_a = cache_seqlens
 
+        q_nope = self.q_absorb.forward(q_nope,shape=[self.num_heads, self.qk_nope_head_dim, self.kv_lora_rank])
+
+        attn_output_list = []
+        # update k_pe compressed_kv
+        for bs in range(batch_size):
+            if cache_seqlens[bs] == 0:
+                attn_weights = (torch.matmul(q_pe, k_pe.mT) + torch.matmul(q_nope, compressed_kv.unsqueeze(-3).mT)) * self.softmax_scale
+                # attn_mask = attn_params.get_attn_mask(attn_weights.device)
+                # if attn_mask is not None: attn_weights = attn_weights + attn_mask
+                attn_weights = nn.functional.softmax(
+                    attn_weights, dim=-1, dtype=torch.float32
+                ).to(q_pe.dtype)
+                attn_weights = nn.functional.dropout(
+                    attn_weights, p=self.attention_dropout
+                )
+                attn_output = torch.einsum('bhql,blc->bhqc', attn_weights, compressed_kv)
+            else:
+                block_num = int(torch.ceil(cache_seqlens[bs] / page_size).item())
+                cache_block = block_table[bs][:block_num]
+                block_id_list = cache_block.tolist()
+                tmp_k = []
+                tmp_v = []
+                for block_id in block_id_list[:-1]:
+                    tmp_k.append(k_cache[block_id,:,:,:])
+                    tmp_v.append(v_cache[block_id,:,:,:])
+                last_length = cache_seqlens[bs].item() - (block_num - 1) * page_size
+                tmp_k.append(k_cache[ block_id_list[-1],:last_length,:,:])
+                tmp_v.append(v_cache[ block_id_list[-1],:last_length,:,:])
+                compressed_kv_item = torch.stack(tmp_k)
+                k_pe_item= torch.stack(tmp_v)
+                compressed_kv_item = compressed_kv_item.squeeze(2).contiguous()
+                k_pe_item = k_pe_item.transpose(1,2).contiguous()
+                compressed_kv_item = torch.cat((compressed_kv_item,compressed_kv[bs].unsqueeze(0)), dim=1)
+                k_pe_item = torch.cat((k_pe_item,k_pe[bs].unsqueeze(0)), dim=2)
+                attn_weights_item = (torch.matmul(q_pe, k_pe_item.mT) + torch.matmul(q_nope, compressed_kv_item.unsqueeze(-3).mT)) * self.softmax_scale
+                # no mask
+                attn_weights_item = nn.functional.softmax(
+                attn_weights_item, dim=-1, dtype=torch.float32
+                ).to(q_pe.dtype)
+                attn_weights_item = nn.functional.dropout(
+                attn_weights_item, p=self.attention_dropout
+                )
+                attn_output_item = torch.einsum('bhql,blc->bhqc', attn_weights_item, compressed_kv_item)
+                attn_output_list.append(attn_output_item)
         if cache.q_block == 1:
             cache.get_kv_state(self.layer_idx, batch_size, 0, attn_params.max_cache_seqlen, page_size, cache_seqlens, block_table)
+        if attn_output_list != []:
+            attn_output = torch.vstack(attn_output_list)
+        
+        # q_nope = torch.matmul(q_nope, self.q_absorb.linear.weight.view(self.num_heads, self.qk_nope_head_dim, self.kv_lora_rank))
 
-        # attn_output = flash_attn_with_kvcache(
-        #     q = q,
-        #     k = k,
-        #     v = v,
-        #     k_cache = k_cache,
-        #     v_cache = v_cache,
-        #     cache_seqlens = cache_seqlens_a,
-        #     block_table = block_table,
-        #     causal = True
-        # )
-        attn_output, _ = flash_attn_cuda.fwd_kvcache(
-            q, k_cache, v_cache, k, v,
-            cache_seqlens_a,
-            None, None,
-            None,
-            block_table,
-            None,
-            None,
-            1 / math.sqrt(cfg.head_dim),
-            True,
-            -1, -1,
-            True,
-            0,
-        )
-        attn_output = attn_output.view((batch_size, q_len, cfg.num_attention_heads * cfg.head_dim))
+        attn_output = self.out_absorb.forward(attn_output, shape=[self.num_heads, self.v_head_dim, self.kv_lora_rank],transpose=[-2,-1])
+        attn_output = attn_output.transpose(1, 2).contiguous()
+
+        attn_output = attn_output.reshape(batch_size, q_len, self.num_heads * self.v_head_dim)
 
         cache.store_kv_state(self.layer_idx, batch_size, 0, q_len, page_size, cache_seqlens, block_table)
 
         # Output projection
 
         if is_q:
-            ext_c.q_attn_forward_2(
-                self.q_handle,
-                hidden_states,
-                attn_output,
-                batch_size,
-                q_len,
-                pass_loras,
-                pass_lora_temp
-            )
+            raise NotImplementedError
+            # ext_c.q_attn_forward_2(
+            #     self.q_handle,
+            #     hidden_states,
+            #     attn_output,
+            #     batch_size,
+            #     q_len,
+            #     pass_loras,
+            #     pass_lora_temp
+            # )
         else:
             hidden_states = self.o_proj.forward(attn_output, loras = loras)
             if self.has_residual:
@@ -1881,7 +1913,7 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
         global has_xformers
 
         if isinstance(attn_params, ExLlamaV2Attention.PagedParams):
-            raise NotImplementedError
+
             return self.forward_paged(
                 hidden_states,
                 cache,
@@ -2023,7 +2055,6 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
         num_attention_heads = cfg.num_attention_heads
         num_key_value_heads = cfg.num_key_value_heads
         num_key_value_groups = cfg.num_key_value_groups
-        head_dim = cfg.head_dim
         hidden_size = cfg.hidden_size
 
         batch_size, q_len, _ = hidden_states.size()
@@ -2046,26 +2077,48 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
         compressed_kv, k_pe = torch.split(
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
+        
+        # compressed_kv = compressed_kv.contiguous()
         compressed_kv = self.kv_a_layernorm.forward(compressed_kv)
         k_pe = k_pe.view(batch_size, q_len, 1, self.qk_rope_head_dim).transpose(1, 2)
         kv_seq_len = k_pe.shape[-2]
         kv_seq_len += past_len
+    
+        # constants = self.model.get_device_tensors(self.device_idx, scratch = False)
+
+        # if attn_params.position_offsets is not None:
+        #     position_offsets = attn_params.get_position_offsets(hidden_states.device)
+        # else:
+        #     position_offsets = none_tensor
+
+        # if cfg.arch.rope_style != RopeStyle.NONE:
+        #     q_pe = q_pe.transpose(1,2).contiguous()
+        #     k_pe = k_pe.transpose(1,2).contiguous()
+        #     ext_c.rope_(q_pe, constants.sin, constants.cos, past_len, num_attention_heads, self.qk_rope_head_dim, position_offsets, cfg.arch.rope_style == RopeStyle.NEOX)
+        #     ext_c.rope_(k_pe, constants.sin, constants.cos, past_len, 1, self.qk_rope_head_dim, position_offsets, cfg.arch.rope_style == RopeStyle.NEOX)
+        #     q_pe = q_pe.transpose(1,2).contiguous()
+        #     k_pe = k_pe.transpose(1,2).contiguous()
+
         cos, sin = self.rotary_emb(q_pe, seq_len=kv_seq_len)
         position_ids = torch.arange(past_len, past_len + q_len)[None,:].expand(batch_size,q_len)
         q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin, position_ids)
 
         if cache is not None:
+            compressed_kv = compressed_kv.unsqueeze(2).contiguous()
+            k_pe = k_pe.transpose(1,2).contiguous()
             batch_keys, batch_values = cache.get_kv_state(self.layer_idx, batch_size, 0, past_len)
-            new_keys = batch_keys.narrow(-2, past_len, q_len).narrow(0, 0, batch_size)
-            new_values = batch_values.narrow(-2, past_len, q_len).narrow(0, 0, batch_size)
+            new_keys = batch_keys.narrow(1, past_len, q_len).narrow(0, 0, batch_size)
+            new_values = batch_values.narrow(1, past_len, q_len).narrow(0, 0, batch_size)
             new_keys.copy_(compressed_kv)
             new_values.copy_(k_pe)
 
             # Key/value tensors with past
 
-            compressed_kv = batch_keys.narrow(-2, 0, past_len + q_len).narrow(0, 0, batch_size)
-            k_pe = batch_values.narrow(-2, 0, past_len + q_len).narrow(0, 0, batch_size)
-        q_nope= self.q_absorb.forward(q_nope,shape=[self.num_heads, self.qk_nope_head_dim, self.kv_lora_rank])
+            compressed_kv = batch_keys.narrow(1, 0, past_len + q_len).narrow(0, 0, batch_size)
+            k_pe = batch_values.narrow(1, 0, past_len + q_len).narrow(0, 0, batch_size)
+            k_pe = k_pe.transpose(1,2).contiguous()
+            compressed_kv = compressed_kv.squeeze(2).contiguous()
+        q_nope = self.q_absorb.forward(q_nope,shape=[self.num_heads, self.qk_nope_head_dim, self.kv_lora_rank])
         # q_nope = torch.matmul(q_nope, self.q_absorb.linear.weight.view(self.num_heads, self.qk_nope_head_dim, self.kv_lora_rank))
         attn_weights = (torch.matmul(q_pe, k_pe.mT) + torch.matmul(q_nope, compressed_kv.unsqueeze(-3).mT)) * self.softmax_scale
         attn_mask = attn_params.get_attn_mask(attn_weights.device)

@@ -292,8 +292,8 @@ class ExLlamaV2DeppSeekCache(ExLlamaV2CacheBase):
         self.v_head_dim = self.model.config.v_head_dim
         self.qk_nope_head_dim = self.model.config.qk_nope_head_dim
         self.qk_rope_head_dim = self.model.config.qk_rope_head_dim
-        self.shape_wk = (self.batch_size, self.max_seq_len, self.kv_lora_rank)
-        self.shape_wv = (self.batch_size, 1, self.max_seq_len, self.qk_rope_head_dim)
+        self.shape_wk = (self.batch_size, self.max_seq_len, 1, self.kv_lora_rank)
+        self.shape_wv = (self.batch_size, self.max_seq_len, 1, self.qk_rope_head_dim)
         self.create_state_tensors(copy_from, lazy)
 
     def get_kv_state(self,
