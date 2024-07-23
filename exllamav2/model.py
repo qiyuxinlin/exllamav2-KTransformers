@@ -903,7 +903,7 @@ class ExLlamaV2:
             else:
                 attn_params = ExLlamaV2DeepSeekAttention.Params(batch_size, seq_len, past_len, input_mask, position_offsets)
         else:
-            if not isinstance(attn_params, ExLlamaV2Attention.PagedParams) and ExLlamaV2DeepSeekAttention.PagedParams:
+            if not isinstance(attn_params, ExLlamaV2Attention.PagedParams) and not isinstance(attn_params,ExLlamaV2DeepSeekAttention.PagedParams):
                 past_len = attn_params.past_len
                 cache.current_seq_len = past_len
 

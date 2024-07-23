@@ -2,15 +2,17 @@
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from exllamav2 import ExLlamaV2, ExLlamaV2Config, ExLlamaV2Cache, ExLlamaV2Tokenizer, Timer
+from exllamav2 import ExLlamaV2, ExLlamaV2Config, ExLlamaV2Cache, ExLlamaV2Tokenizer, Timer, ExLlamaV2DeppSeekCache
 from exllamav2.generator import ExLlamaV2DynamicGenerator, ExLlamaV2DynamicJob, ExLlamaV2Sampler
 from util import format_prompt, get_stop_conditions
 from blessed import Terminal
 
-model_dir = "/data/model/Qwen1.5-MoE-A2.7B-Chat"
+# model_dir = "/data/model/Qwen1.5-MoE-A2.7B-Chat"
+model_dir = "/data/model/DeepSeek-V2-Lite-Chat"
 config = ExLlamaV2Config(model_dir)
 model = ExLlamaV2(config)
-cache = ExLlamaV2Cache(model, max_seq_len = 32768, lazy = True)
+cache = ExLlamaV2DeppSeekCache(model, max_seq_len = 32768, lazy = True)
+# cache = ExLlamaV2Cache(model, max_seq_len = 32768, lazy = True)
 model.load_autosplit(cache, progress = True)
 
 print("Loading tokenizer...")

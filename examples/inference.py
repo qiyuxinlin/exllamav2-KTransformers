@@ -4,10 +4,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from exllamav2 import ExLlamaV2, ExLlamaV2Config, ExLlamaV2Cache, ExLlamaV2Tokenizer, Timer, ExLlamaV2DeppSeekCache
 from exllamav2.generator import ExLlamaV2DynamicGenerator
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 # model_dir = "/data/model/Mistral-87B-Instruct-v0.1"
-# model_dir = "/data/model/DeepSeek-V2-Lite-Chat"
-model_dir = "/data/model/DeepSeek-V2-Lite-gptq-4bit"
+model_dir = "/data/model/DeepSeek-V2-Lite-Chat"
+# model_dir = "/data/model/DeepSeek-V2-Lite-gptq-4bit"
 # model_dir = "/data/model/Qwen1.5-MoE-A2.7B-Chat"
 # model_dir = "/data/model/Qwen1.5-7B-Chat"
 # model_dir = "/data/model/Qwen2-57B-A14B-Instruct"
@@ -16,7 +16,7 @@ config = ExLlamaV2Config(model_dir)
 model = ExLlamaV2(config)
 # cache = ExLlamaV2Cache(model, max_seq_len = 4096, lazy = True)
 cache = ExLlamaV2DeppSeekCache(model, max_seq_len = 4096, lazy = True)
-model.load_autosplit(cache, progress = False)
+model.load_autosplit(cache, progress = True)
 
 print("Loading tokenizer...")
 tokenizer = ExLlamaV2Tokenizer(config)
@@ -30,7 +30,7 @@ generator = ExLlamaV2DynamicGenerator(
     paged = True,
 )
 
-max_new_tokens = 250
+max_new_tokens = 300
 
 # Warmup generator. The function runs a small completion job to allow all the kernels to fully initialize and
 # autotune before we do any timing measurements. It can be a little slow for larger models and is not needed
@@ -59,7 +59,7 @@ prompts = [
     "Once upon a time,",
     "The secret to success is",
     "There's no such thing as",
-    "Here's why you should adopt a cat:",
+    "You are an AI coding model, Implement QuickSort in Java, C# and Rust."
 ]
 
 with Timer() as t_batched:

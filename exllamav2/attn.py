@@ -71,7 +71,14 @@ def assert_paged_attn():
     global has_flash_attn_with_paged
     assert has_flash_attn_with_paged, \
         "Paged attention required Flash Attention 2.5.7 or later"
+def create_lower_triangular_tensor(num_heads, seq_len):
+    matrix = torch.full((seq_len, seq_len), -65504.0)
+    lower_triangular = torch.triu(matrix, diagonal=1)
 
+    result = lower_triangular.unsqueeze(0).unsqueeze(0)
+    
+    
+    return result
 
 class ExLlamaV2Attention(ExLlamaV2Module):
 
@@ -1736,6 +1743,10 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
             )
             compressed_kv = self.kv_a_layernorm.forward(compressed_kv)
             k_pe = k_pe.view(batch_size, q_len, 1, self.qk_rope_head_dim).transpose(1, 2)
+            # past_len = cache_seqlens[0].item()
+            # cos, sin = self.rotary_emb(q_pe, seq_len=past_len+q_len)
+            # position_ids = torch.arange(past_len, past_len + q_len)[None,:].expand(batch_size,q_len)
+            # q_pe, k_pe = apply_rotary_pos_emb(q_pe, k_pe, cos, sin, position_ids)
             for bs in range(batch_size):
                 past_len = cache_seqlens[bs].item()
                 cos, sin = self.rotary_emb(q_pe, seq_len=past_len+q_len)
@@ -1752,6 +1763,32 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
                 v_.copy_(k_pe)
                 k_pe = k_pe.transpose(1,2).contiguous()
                 compressed_kv = compressed_kv.squeeze(2).contiguous()
+            else:
+                for bs in range(batch_size):
+                    if len(block_table[bs]) == 1:
+                        first_index = block_table[bs].item() * page_size + cache_seqlens[bs].item()
+                        k_ = k_cache_f[:, first_index : first_index + q_len, :, :]
+                        v_ = v_cache_f[:, first_index : first_index + q_len, :, :]
+                        compressed_kv = compressed_kv.unsqueeze(2).contiguous()
+                        k_pe = k_pe.transpose(1,2).contiguous()
+                        k_.copy_(compressed_kv[bs].unsqueeze(0))
+                        v_.copy_(k_pe[bs].unsqueeze(0))
+                        k_pe = k_pe.transpose(1,2).contiguous()
+                        compressed_kv = compressed_kv.squeeze(2).contiguous()
+                    else:
+                        if cache_seqlens[bs].item() < page_size:
+                            first_index = block_table[bs][0].item() * page_size + cache_seqlens[bs].item()
+                        else:
+                            new_cache_index = torch.where(block_table[bs] != 0)[0][-1].item()
+                            first_index = block_table[bs][new_cache_index].item() * page_size + (cache_seqlens[bs].item() - len(block_table[bs][:new_cache_index])*page_size)
+                        k_ = k_cache_f[:, first_index : first_index + q_len, :, :]
+                        v_ = v_cache_f[:, first_index : first_index + q_len, :, :]
+                        compressed_kv = compressed_kv.unsqueeze(2).contiguous()
+                        k_pe = k_pe.transpose(1,2).contiguous()
+                        k_.copy_(compressed_kv[bs].unsqueeze(0))
+                        v_.copy_(k_pe[bs].unsqueeze(0))
+                        k_pe = k_pe.transpose(1,2).contiguous()
+                        compressed_kv = compressed_kv.squeeze(2).contiguous()
         if attn_params.is_sequential:
             # compressed_kv = None
             # k_pe = None
@@ -1765,16 +1802,20 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
         # update k_pe compressed_kv
         for bs in range(batch_size):
             if cache_seqlens[bs] == 0:
-                attn_weights = (torch.matmul(q_pe, k_pe.mT) + torch.matmul(q_nope, compressed_kv.unsqueeze(-3).mT)) * self.softmax_scale
-                # attn_mask = attn_params.get_attn_mask(attn_weights.device)
+                attn_weights_item = (torch.matmul(q_pe[bs].unsqueeze(0), k_pe.mT) + torch.matmul(q_nope[bs].unsqueeze(0), compressed_kv.unsqueeze(-3).mT)) * self.softmax_scale
+                if q_len != 1:
+                    attn_mask = create_lower_triangular_tensor(self.num_heads,attn_weights_item.shape[-1]).to(attn_weights_item.device)
+                    attn_weights_item = attn_weights_item + attn_mask
+                    
                 # if attn_mask is not None: attn_weights = attn_weights + attn_mask
-                attn_weights = nn.functional.softmax(
-                    attn_weights, dim=-1, dtype=torch.float32
+                attn_weights_item = nn.functional.softmax(
+                attn_weights_item, dim=-1, dtype=torch.float32
                 ).to(q_pe.dtype)
-                attn_weights = nn.functional.dropout(
-                    attn_weights, p=self.attention_dropout
+                attn_weights_item = nn.functional.dropout(
+                attn_weights_item, p=self.attention_dropout
                 )
-                attn_output = torch.einsum('bhql,blc->bhqc', attn_weights, compressed_kv)
+                attn_output_item = torch.einsum('bhql,blc->bhqc', attn_weights_item, compressed_kv)
+                attn_output_list.append(attn_output_item)
             else:
                 block_num = int(torch.ceil(cache_seqlens[bs] / page_size).item())
                 cache_block = block_table[bs][:block_num]
@@ -1787,14 +1828,17 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
                 last_length = cache_seqlens[bs].item() - (block_num - 1) * page_size
                 tmp_k.append(k_cache[ block_id_list[-1],:last_length,:,:])
                 tmp_v.append(v_cache[ block_id_list[-1],:last_length,:,:])
-                compressed_kv_item = torch.stack(tmp_k)
-                k_pe_item= torch.stack(tmp_v)
+                compressed_kv_item = torch.vstack(tmp_k).unsqueeze(0)
+                k_pe_item = torch.vstack(tmp_v).unsqueeze(0)
                 compressed_kv_item = compressed_kv_item.squeeze(2).contiguous()
                 k_pe_item = k_pe_item.transpose(1,2).contiguous()
                 compressed_kv_item = torch.cat((compressed_kv_item,compressed_kv[bs].unsqueeze(0)), dim=1)
                 k_pe_item = torch.cat((k_pe_item,k_pe[bs].unsqueeze(0)), dim=2)
-                attn_weights_item = (torch.matmul(q_pe, k_pe_item.mT) + torch.matmul(q_nope, compressed_kv_item.unsqueeze(-3).mT)) * self.softmax_scale
+                attn_weights_item = (torch.matmul(q_pe[bs].unsqueeze(0), k_pe_item.mT) + torch.matmul(q_nope[bs].unsqueeze(0), compressed_kv_item.unsqueeze(-3).mT)) * self.softmax_scale
                 # no mask
+                if q_len != 1:
+                    attn_mask = create_lower_triangular_tensor(self.num_heads,attn_weights_item.shape[-1]).to(attn_weights_item.device)
+                    attn_weights_item = attn_weights_item + attn_mask[:,:,attn_mask.shape[2] - attn_weights_item.shape[2]:,:]
                 attn_weights_item = nn.functional.softmax(
                 attn_weights_item, dim=-1, dtype=torch.float32
                 ).to(q_pe.dtype)
@@ -1912,7 +1956,7 @@ class ExLlamaV2DeepSeekAttention(ExLlamaV2Module):
         global has_flash_attn
         global has_xformers
 
-        if isinstance(attn_params, ExLlamaV2Attention.PagedParams):
+        if isinstance(attn_params, ExLlamaV2DeepSeekAttention.PagedParams):
 
             return self.forward_paged(
                 hidden_states,
